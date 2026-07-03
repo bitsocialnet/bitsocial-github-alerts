@@ -3,7 +3,7 @@ use crate::webhooks::common::{process_webhook, WebhookContext};
 use crate::webhooks::github::webhook_handlers::{
     handle_check_run_event, handle_comment_event, handle_create_event, handle_delete_event,
     handle_issue_event, handle_ping_event, handle_pull_request_event, handle_push_event,
-    handle_wiki_event, handle_workflow_run_event,
+    handle_release_event, handle_wiki_event, handle_workflow_run_event,
 };
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
 use bitsocial_github_alerts::db::DbPool;
@@ -50,6 +50,7 @@ pub async fn handle_github_webhook(
             "create" => handle_create_event(&body, branch_filter.as_ref()),
             "delete" => handle_delete_event(&body, branch_filter.as_ref()),
             "gollum" => handle_wiki_event(&body),
+            "release" => handle_release_event(&body),
             "workflow_run" => handle_workflow_run_event(&body, branch_filter.as_ref()),
             _ => String::new(),
         };

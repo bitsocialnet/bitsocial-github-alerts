@@ -39,6 +39,9 @@ struct Sender {
     login: String,
 }
 
+const MAX_COMMITS_SHOWN: usize = 5;
+const MAX_COMMIT_LINE_CHARS: usize = 72;
+
 pub fn handle_push_event(body: &web::Bytes, branch_filter: Option<&BranchFilter>) -> String {
     let push_event: PushEvent = match parse_webhook_payload(body) {
         Ok(event) => event,
@@ -75,13 +78,11 @@ pub fn handle_push_event(body: &web::Bytes, branch_filter: Option<&BranchFilter>
 
     let mut commit_paragraph = first_row;
 
-    for commit in push_event.commits.iter().rev() {
-        tracing::info!("Commit: {}", commit.message);
-        tracing::info!("Commit url: {}", commit.url);
-        tracing::info!("Commit author: {}", commit.author.name);
-
+    // Newest first, capped at MAX_COMMITS_SHOWN commits
+    for commit in push_event.commits.iter().rev().take(MAX_COMMITS_SHOWN) {
         let commit_url = &commit.url;
-        let commit_message = encode_text(commit.message.trim_end());
+        let summary = commit_summary(&commit.message);
+        let commit_message = encode_text(&summary);
         let commit_author_name = encode_text(&commit.author.name);
 
         commit_paragraph.push_str(&format!(
@@ -90,7 +91,27 @@ pub fn handle_push_event(body: &web::Bytes, branch_filter: Option<&BranchFilter>
         ));
     }
 
+    let total_commits = push_event.commits.len();
+    if total_commits > MAX_COMMITS_SHOWN {
+        commit_paragraph.push_str(&format!(
+            "… and {} more\n",
+            total_commits - MAX_COMMITS_SHOWN
+        ));
+    }
+
     commit_paragraph
+}
+
+/// First line of a commit message, truncated to MAX_COMMIT_LINE_CHARS characters.
+fn commit_summary(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or("").trim_end();
+
+    if first_line.chars().count() > MAX_COMMIT_LINE_CHARS {
+        let truncated: String = first_line.chars().take(MAX_COMMIT_LINE_CHARS - 1).collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        first_line.to_string()
+    }
 }
 
 struct CreateFirstRow {
@@ -143,5 +164,84 @@ fn create_first_row(push_event: &PushEvent) -> CreateFirstRow {
     CreateFirstRow {
         first_row,
         delete_branch_event,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::web::Bytes;
+    use serde_json::json;
+
+    fn push_payload(commit_messages: &[&str]) -> Bytes {
+        let commits: Vec<_> = commit_messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                json!({
+                    "message": m,
+                    "url": format!("https://github.com/bitsocialnet/example/commit/{i}"),
+                    "author": {"name": "octocat"}
+                })
+            })
+            .collect();
+
+        Bytes::from(
+            json!({
+                "ref": "refs/heads/main",
+                "before": "1111111111111111111111111111111111111111",
+                "after": "2222222222222222222222222222222222222222",
+                "forced": false,
+                "commits": commits,
+                "repository": {
+                    "html_url": "https://github.com/bitsocialnet/example",
+                    "name": "example"
+                },
+                "sender": {"login": "octocat"}
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn test_commit_list_capped_at_five() {
+        let messages: Vec<String> = (1..=8).map(|i| format!("commit {i}")).collect();
+        let refs: Vec<&str> = messages.iter().map(|s| s.as_str()).collect();
+        let result = handle_push_event(&push_payload(&refs), None);
+
+        assert!(result.contains("pushed 8 commits"));
+        // Newest five commits shown
+        for i in 4..=8 {
+            assert!(
+                result.contains(&format!("commit {i}")),
+                "missing commit {i}"
+            );
+        }
+        assert!(!result.contains("commit 3</a>"));
+        assert!(result.contains("… and 3 more"));
+    }
+
+    #[test]
+    fn test_no_more_line_for_few_commits() {
+        let result = handle_push_event(&push_payload(&["one", "two"]), None);
+        assert!(!result.contains("more"));
+    }
+
+    #[test]
+    fn test_commit_summary_first_line_only() {
+        let result = handle_push_event(
+            &push_payload(&["short title\n\nlong body with details"]),
+            None,
+        );
+        assert!(result.contains("short title"));
+        assert!(!result.contains("long body"));
+    }
+
+    #[test]
+    fn test_commit_summary_truncated() {
+        let long = "x".repeat(120);
+        let summary = commit_summary(&long);
+        assert!(summary.chars().count() <= MAX_COMMIT_LINE_CHARS);
+        assert!(summary.ends_with('…'));
     }
 }

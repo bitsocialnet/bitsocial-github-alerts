@@ -5,6 +5,7 @@ pub mod issue;
 pub mod ping;
 pub mod pull_request;
 pub mod push;
+pub mod release;
 #[cfg(test)]
 mod test_branch_filtering;
 mod utils;
@@ -18,5 +19,6 @@ pub use issue::handle_issue_event;
 pub use ping::handle_ping_event;
 pub use pull_request::handle_pull_request_event;
 pub use push::handle_push_event;
+pub use release::handle_release_event;
 pub use wiki::handle_wiki_event;
 pub use workflow_run::handle_workflow_run_event;
