@@ -43,6 +43,9 @@ pub struct TelegramMessage {
     pub chat_id: i64,
     pub thread_id: Option<i32>,
     pub message: String,
+    /// Whether Telegram should render a link-preview card for links in the
+    /// message. Only release notifications enable this.
+    pub link_preview: bool,
 }
 
 #[derive(BotCommands, Clone)]
@@ -126,6 +129,7 @@ impl BotService {
                         "Hi there! Our bot is currently having some problems. \
                          Please create a Github issue here: {ISSUES_URL}"
                     ),
+                    link_preview: false,
                 })
                 .await?;
                 return Ok(());
@@ -157,6 +161,7 @@ impl BotService {
             chat_id,
             thread_id,
             message,
+            link_preview: false,
         })
         .await?;
 
@@ -243,6 +248,7 @@ impl BotService {
             chat_id,
             thread_id,
             message,
+            link_preview,
         } = message;
 
         tracing::info!("Sending message to {}: {}", chat_id, message);
@@ -251,7 +257,8 @@ impl BotService {
 
         let mut request = bot
             .send_message(chat_id, &message)
-            .parse_mode(ParseMode::Html);
+            .parse_mode(ParseMode::Html)
+            .disable_web_page_preview(!link_preview);
 
         if let Some(tid) = thread_id {
             request = request.message_thread_id(tid);

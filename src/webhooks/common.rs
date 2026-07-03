@@ -74,6 +74,9 @@ pub struct WebhookContext<'a> {
     pub token: String,
     pub event_name: &'a str,
     pub source: &'a str,
+    /// Whether Telegram should render a link-preview card for links in the
+    /// message. Only release notifications enable this.
+    pub link_preview: bool,
 }
 
 pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
@@ -177,6 +180,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
             chat_id: telegram_chat_id,
             thread_id,
             message: message.clone(),
+            link_preview: ctx.link_preview,
         })
         .await;
 
@@ -220,6 +224,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                                     chat_id: *new_chat_id,
                                     thread_id,
                                     message: message.clone(),
+                                    link_preview: ctx.link_preview,
                                 })
                                 .await;
 
@@ -315,6 +320,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                             chat_id: telegram_chat_id,
                             thread_id,
                             message: message.clone(),
+                            link_preview: ctx.link_preview,
                         })
                         .await;
 
@@ -341,6 +347,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                             chat_id: telegram_chat_id,
                             thread_id,
                             message: message.clone(),
+                            link_preview: ctx.link_preview,
                         })
                         .await;
 

@@ -72,6 +72,7 @@ pub async fn handle_github_webhook(
             token: github_token,
             event_name: event_str,
             source: "github",
+            link_preview: event_str == "release",
         })
         .await
     } else {
