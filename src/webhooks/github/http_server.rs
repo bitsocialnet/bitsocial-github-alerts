@@ -6,7 +6,7 @@ use crate::webhooks::github::webhook_handlers::{
     handle_wiki_event, handle_workflow_run_event,
 };
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
-use notifine::db::DbPool;
+use bitsocial_github_alerts::db::DbPool;
 use serde::Deserialize;
 use std::env;
 

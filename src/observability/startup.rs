@@ -3,13 +3,7 @@ use super::ALERTS;
 use std::env;
 use teloxide::Bot;
 
-const BOT_TOKEN_VARS: [&str; 5] = [
-    "GITLAB_TELOXIDE_TOKEN",
-    "GITHUB_TELOXIDE_TOKEN",
-    "BEEP_TELOXIDE_TOKEN",
-    "UPTIME_TELOXIDE_TOKEN",
-    "AGREEMENT_BOT_TOKEN",
-];
+const BOT_TOKEN_VARS: [&str; 1] = ["GITHUB_TELOXIDE_TOKEN"];
 
 fn get_any_bot_token() -> Option<String> {
     BOT_TOKEN_VARS

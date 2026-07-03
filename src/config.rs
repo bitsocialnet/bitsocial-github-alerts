@@ -10,11 +10,7 @@ pub struct AppConfig {
     pub admin_chat_id: Option<i64>,
     pub admin_log_level: u8,
 
-    pub gitlab_token: Option<String>,
-    pub github_token: Option<String>,
-    pub beep_token: Option<String>,
-    pub uptime_token: Option<String>,
-    pub agreement_bot_token: Option<String>,
+    pub github_token: String,
 }
 
 #[derive(Debug)]
@@ -64,6 +60,7 @@ impl AppConfig {
 
         let database_url = get_required("DATABASE_URL", &mut missing);
         let webhook_base_url = get_required("WEBHOOK_BASE_URL", &mut missing);
+        let github_token = get_required("GITHUB_TELOXIDE_TOKEN", &mut missing);
 
         let admin_logs = get_optional("ADMIN_LOGS").unwrap_or_else(|| "NOT_ACTIVE".into());
 
@@ -88,25 +85,6 @@ impl AppConfig {
             })
             .unwrap_or(8080);
 
-        let gitlab_token = get_optional("GITLAB_TELOXIDE_TOKEN");
-        let github_token = get_optional("GITHUB_TELOXIDE_TOKEN");
-        let beep_token = get_optional("BEEP_TELOXIDE_TOKEN");
-        let uptime_token = get_optional("UPTIME_TELOXIDE_TOKEN");
-        let agreement_bot_token = get_optional("AGREEMENT_BOT_TOKEN");
-
-        let has_any_bot_token = gitlab_token.is_some()
-            || github_token.is_some()
-            || beep_token.is_some()
-            || uptime_token.is_some()
-            || agreement_bot_token.is_some();
-
-        if !has_any_bot_token {
-            invalid.push((
-                "BOT_TOKENS".into(),
-                "At least one bot token must be configured".into(),
-            ));
-        }
-
         if !missing.is_empty() || !invalid.is_empty() {
             return Err(ConfigError {
                 missing_vars: missing,
@@ -121,11 +99,7 @@ impl AppConfig {
             admin_logs,
             admin_chat_id,
             admin_log_level,
-            gitlab_token,
-            github_token,
-            beep_token,
-            uptime_token,
-            agreement_bot_token,
+            github_token: github_token.unwrap(),
         })
     }
 

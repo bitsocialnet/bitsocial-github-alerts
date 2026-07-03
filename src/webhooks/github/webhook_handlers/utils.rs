@@ -1,6 +1,5 @@
 use serde::de::DeserializeOwned;
 use serde_urlencoded;
-use ureq::serde_json;
 
 pub fn parse_webhook_payload<T>(body: &[u8]) -> Result<T, String>
 where

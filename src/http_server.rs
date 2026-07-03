@@ -1,8 +1,6 @@
-use crate::webhooks::beep::http_server::handle_beep_webhook;
 use crate::webhooks::github::http_server::handle_github_webhook;
-use crate::webhooks::gitlab::http_server::handle_gitlab_webhook;
 use actix_web::{get, middleware, web, App, HttpServer, Responder};
-use notifine::db::DbPool;
+use bitsocial_github_alerts::db::DbPool;
 use std::env;
 
 pub async fn run_http_server(pool: DbPool) -> std::io::Result<()> {
@@ -20,9 +18,7 @@ pub async fn run_http_server(pool: DbPool) -> std::io::Result<()> {
             .app_data(pool_data.clone())
             .wrap(middleware::Logger::default())
             .service(health)
-            .service(handle_gitlab_webhook)
             .service(handle_github_webhook)
-            .service(handle_beep_webhook)
     })
     .bind(("0.0.0.0", port))?
     .run()

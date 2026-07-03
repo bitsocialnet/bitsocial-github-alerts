@@ -1,10 +1,7 @@
+use crate::http_server::run_http_server;
 use crate::observability::startup::{
     alert_database_error, alert_http_server_error, alert_migration_error, alert_startup_success,
 };
-use crate::services::broadcast::BroadcastWorker;
-use crate::services::reminder_scheduler::run_reminder_scheduler;
-use crate::services::statistics_scheduler::run_statistics_scheduler;
-use crate::{http_server::run_http_server, services::uptime_checker::run_uptime_checker};
 
 use dotenv::dotenv;
 use std::sync::Arc;
@@ -15,14 +12,13 @@ pub mod bots;
 pub mod config;
 pub mod http_server;
 pub mod observability;
-pub mod services;
 pub mod utils;
 pub mod webhooks;
 
 use crate::bots::bot_service::{BotConfig, BotService};
 use crate::config::AppConfig;
+use bitsocial_github_alerts::db::{create_pool, DbPool};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use notifine::db::{create_pool, DbPool};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/");
 
@@ -69,27 +65,9 @@ async fn main() {
 
     let pool: DbPool = Arc::new(pool);
 
-    if let Some(token) = config.gitlab_token.clone() {
+    {
         let pool = pool.clone();
-        let webhook_base_url = config.webhook_base_url.clone();
-        let admin_chat_id = config.admin_chat_id;
-        task::spawn(
-            BotService::new(
-                BotConfig {
-                    bot_name: "Gitlab".to_string(),
-                    token,
-                    webhook_base_url,
-                    admin_chat_id,
-                },
-                pool,
-            )
-            .run_bot(),
-        );
-        tracing::info!("GitLab bot enabled");
-    }
-
-    if let Some(token) = config.github_token.clone() {
-        let pool = pool.clone();
+        let token = config.github_token.clone();
         let webhook_base_url = config.webhook_base_url.clone();
         let admin_chat_id = config.admin_chat_id;
         task::spawn(
@@ -107,71 +85,6 @@ async fn main() {
         tracing::info!("GitHub bot enabled");
     }
 
-    if let Some(token) = config.beep_token.clone() {
-        let pool = pool.clone();
-        let webhook_base_url = config.webhook_base_url.clone();
-        let admin_chat_id = config.admin_chat_id;
-        task::spawn(
-            BotService::new(
-                BotConfig {
-                    bot_name: "Beep".to_string(),
-                    token,
-                    webhook_base_url,
-                    admin_chat_id,
-                },
-                pool,
-            )
-            .run_bot(),
-        );
-        tracing::info!("Beep bot enabled");
-    }
-
-    if let Some(token) = config.uptime_token.clone() {
-        let pool = pool.clone();
-        let admin_chat_id = config.admin_chat_id;
-        task::spawn(bots::uptime_bot::run_bot(pool, token, admin_chat_id));
-        tracing::info!("Uptime bot enabled");
-    }
-
-    if let Some(token) = config.agreement_bot_token.clone() {
-        let pool = pool.clone();
-        let admin_chat_id = config.admin_chat_id;
-        task::spawn(bots::agreement_bot::run_bot(pool, token, admin_chat_id));
-        tracing::info!("Agreement bot enabled");
-    }
-
-    task::spawn({
-        let pool = pool.clone();
-        async move {
-            run_uptime_checker(pool).await;
-        }
-    });
-
-    task::spawn({
-        let pool = pool.clone();
-        async move {
-            run_reminder_scheduler(pool).await;
-        }
-    });
-
-    task::spawn({
-        let pool = pool.clone();
-        let admin_chat_id = config.admin_chat_id;
-        async move {
-            let worker = BroadcastWorker::new(pool, admin_chat_id);
-            worker.run().await;
-        }
-    });
-    tracing::info!("Broadcast worker enabled");
-
-    task::spawn({
-        let pool = pool.clone();
-        async move {
-            run_statistics_scheduler(pool).await;
-        }
-    });
-    tracing::info!("Statistics scheduler enabled");
-
     alert_startup_success().await;
 
     if let Err(e) = run_http_server(pool).await {
@@ -179,6 +92,4 @@ async fn main() {
         alert_http_server_error(&error_msg).await;
         std::process::exit(1);
     }
-
-    tracing::info!("Main");
 }

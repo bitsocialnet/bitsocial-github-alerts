@@ -1,1 +1,0 @@
-ALTER TABLE broadcast_jobs ADD COLUMN discovery_mode BOOLEAN NOT NULL DEFAULT FALSE;

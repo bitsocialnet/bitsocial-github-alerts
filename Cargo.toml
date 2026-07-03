@@ -1,5 +1,5 @@
 [package]
-name = "notifine"
+name = "bitsocial-github-alerts"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,24 +14,11 @@ actix-web = "4.5.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_urlencoded = "0.7.1"
 dotenv = "0.15.0"
-diesel = { version = "2.1.5", features = ["postgres", "r2d2", "serde_json", "chrono", "numeric"] }
-bigdecimal = "0.4"
+diesel = { version = "2.1.5", features = ["postgres", "r2d2", "serde_json", "chrono"] }
 glob = "0.3.1"
 rand = "0.8.5"
-reqwest = { version = "0.12.3", features = ["json", "blocking"] }
-reqwest-oauth1 = "0.2.4"
-oauth = { version = "0.6", package = "oauth1-request" }
-ureq = { version = "2.9.6", features = ["json"] }
-url = "2.5.0"
 diesel_migrations = "2.1.0"
 html-escape = "0.2.13"
-uuid = { version = "1.10", features = ["v4", "serde"] }
-sha2 = "0.10"
-base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 serde_json = "1.0"
-urlencoding = "2.1"
-aes-gcm = "0.10"
-hex = "0.4"
 lazy_static = "1.4"

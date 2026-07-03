@@ -1,16 +1,11 @@
 use crate::observability::alerts::Severity;
 use crate::observability::{ALERTS, METRICS};
-use crate::services::broadcast::commands::{
-    handle_approve_all, handle_broadcast, handle_broadcast_cancel, handle_broadcast_status,
-    handle_broadcast_test, handle_pending_list, handle_reject_all,
-};
-use crate::services::broadcast::db::{handle_bot_removed, upsert_chat_bot_subscription};
-use crate::services::broadcast::types::BotType;
-use crate::services::stats::{record_churn_event, record_new_chat_event};
 use crate::utils::telegram_admin::send_message_to_admin;
+use bitsocial_github_alerts::db::DbPool;
+use bitsocial_github_alerts::{
+    deactivate_chat, get_webhook_url_or_create, WebhookGetOrCreateInput,
+};
 use html_escape::encode_text;
-use notifine::db::DbPool;
-use notifine::{get_webhook_url_or_create, WebhookGetOrCreateInput};
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::dptree::case;
 use teloxide::macros::BotCommands;
@@ -19,6 +14,8 @@ use teloxide::prelude::LoggingErrorHandler;
 use teloxide::prelude::{ChatId, ChatMemberUpdated, Message, Requester, ResponseResult, Update};
 use teloxide::types::{ChatMemberKind, ParseMode};
 use teloxide::{dptree, filter_command, Bot};
+
+const ISSUES_URL: &str = "https://github.com/bitsocialnet/bitsocial-github-alerts/issues/new";
 
 #[derive(Debug, Clone)]
 pub struct BotConfig {
@@ -48,13 +45,6 @@ pub struct TelegramMessage {
     pub message: String,
 }
 
-#[derive(Clone, Default)]
-pub enum State {
-    #[default]
-    Start,
-    ReceiveBotReview,
-}
-
 #[derive(BotCommands, Clone)]
 #[command(
     rename_rule = "lowercase",
@@ -63,26 +53,6 @@ pub enum State {
 enum Command {
     #[command(description = "starts!")]
     Start,
-    #[command(
-        description = "Send a broadcast message to all users (admin only). Usage: /broadcast [--discover] <message>"
-    )]
-    Broadcast,
-    #[command(
-        description = "Test broadcast (dry run, shows target count). Usage: /broadcasttest [--discover] <message>"
-    )]
-    Broadcasttest,
-    #[command(description = "Show recent broadcast job status (admin only)")]
-    Broadcaststatus,
-    #[command(
-        description = "Cancel a broadcast job (admin only). Usage: /broadcastcancel <job_id>"
-    )]
-    Broadcastcancel,
-    #[command(description = "List pending chat deactivations (admin only)")]
-    Pendinglist,
-    #[command(description = "Approve all pending deactivations (admin only)")]
-    Approveall,
-    #[command(description = "Reject all pending deactivations (admin only)")]
-    Rejectall,
 }
 
 impl BotService {
@@ -123,7 +93,7 @@ impl BotService {
             chat_id,
             thread_id,
             inviter_username,
-            chat_title,
+            chat_title: _,
         } = start_command;
         let bot_name = &self.config.bot_name;
 
@@ -152,10 +122,10 @@ impl BotService {
                 self.send_telegram_message(TelegramMessage {
                     chat_id,
                     thread_id,
-                    message: "Hi there! Our bot is currently having some problems. \
-                              Please create a Github issue here: \
-                              https://github.com/mhkafadar/notifine/issues/new"
-                        .to_string(),
+                    message: format!(
+                        "Hi there! Our bot is currently having some problems. \
+                         Please create a Github issue here: {ISSUES_URL}"
+                    ),
                 })
                 .await?;
                 return Ok(());
@@ -164,11 +134,11 @@ impl BotService {
 
         let message = if webhook_info.webhook_url.is_empty() {
             tracing::error!("Error creating or getting webhook: {:?}", webhook_info);
-            "Hi there!\
-                      Our bot is curently has some problems \
-                      Please create a Github issue here: \
-                      https://github.com/mhkafadar/notifine/issues/new"
-                .to_string()
+            format!(
+                "Hi there! \
+                 Our bot currently has some problems. \
+                 Please create a Github issue here: {ISSUES_URL}"
+            )
         } else {
             format!(
                 "Hi there! \
@@ -190,25 +160,9 @@ impl BotService {
         })
         .await?;
 
-        if let Some(bt) = BotType::parse(bot_name) {
-            if let Err(e) = upsert_chat_bot_subscription(&self.pool, chat_id, bt, true) {
-                tracing::warn!("Failed to track subscription for {:?}: {:?}", bt, e);
-            }
-        }
-
         if webhook_info.is_new {
             METRICS.increment_new_chat();
             let inviter_username_str = inviter_username.unwrap_or_else(|| "unknown".to_string());
-
-            if let Err(e) = record_new_chat_event(
-                &self.pool,
-                chat_id,
-                bot_name,
-                Some(inviter_username_str.as_str()),
-                chat_title.as_deref(),
-            ) {
-                tracing::warn!("Failed to record new chat event: {:?}", e);
-            }
 
             send_message_to_admin(
                 &self.bot,
@@ -257,44 +211,26 @@ impl BotService {
             tracing::info!("Bot removed from chat {}", chat_id);
             METRICS.increment_churn();
 
-            if let Err(e) = record_churn_event(&self.pool, chat_id, bot_name, chat_title.as_deref())
-            {
-                tracing::warn!("Failed to record churn event: {:?}", e);
-            }
-
-            if let Some(bt) = BotType::parse(bot_name) {
-                match handle_bot_removed(&self.pool, chat_id, bt) {
-                    Ok(was_deactivated) => {
-                        let message = if was_deactivated {
-                            format!(
-                                "{bot_name} bot removed from chat {chat_id} - chat deactivated (no reachable bots)"
-                            )
-                        } else {
-                            format!(
-                                "{bot_name} bot removed from chat {chat_id} but other bots still reachable"
-                            )
-                        };
-                        send_message_to_admin(&self.bot, message, 10).await?;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to handle bot removal for chat {}: {:?}",
-                            chat_id,
-                            e
-                        );
-                        METRICS.increment_errors();
-                        ALERTS
-                            .send_alert(
-                                &self.bot,
-                                Severity::Warning,
-                                "Database",
-                                &format!(
-                                    "Failed to handle bot removal for chat {}: {}",
-                                    chat_id, e
-                                ),
-                            )
-                            .await;
-                    }
+            match deactivate_chat(&self.pool, &chat_id.to_string()) {
+                Ok(_) => {
+                    send_message_to_admin(
+                        &self.bot,
+                        format!("{bot_name} bot removed from chat {chat_id} - chat deactivated"),
+                        10,
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to deactivate chat {}: {:?}", chat_id, e);
+                    METRICS.increment_errors();
+                    ALERTS
+                        .send_alert(
+                            &self.bot,
+                            Severity::Warning,
+                            "Database",
+                            &format!("Failed to deactivate chat {}: {}", chat_id, e),
+                        )
+                        .await;
                 }
             }
         }
@@ -328,71 +264,11 @@ impl BotService {
 
     pub async fn run_bot(self) {
         let handler = Update::filter_message()
-            .branch(
-                filter_command::<Command, _>()
-                    .branch(case![Command::Start].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            bot.handle_start_command(msg).await
-                        },
-                    ))
-                    .branch(case![Command::Broadcast].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_broadcast(&bot.bot, &msg, &bot.pool, bot.config.admin_chat_id)
-                                .await
-                        },
-                    ))
-                    .branch(case![Command::Broadcasttest].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_broadcast_test(
-                                &bot.bot,
-                                &msg,
-                                &bot.pool,
-                                bot.config.admin_chat_id,
-                            )
-                            .await
-                        },
-                    ))
-                    .branch(case![Command::Broadcaststatus].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_broadcast_status(
-                                &bot.bot,
-                                &msg,
-                                &bot.pool,
-                                bot.config.admin_chat_id,
-                            )
-                            .await
-                        },
-                    ))
-                    .branch(case![Command::Broadcastcancel].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_broadcast_cancel(
-                                &bot.bot,
-                                &msg,
-                                &bot.pool,
-                                bot.config.admin_chat_id,
-                            )
-                            .await
-                        },
-                    ))
-                    .branch(case![Command::Pendinglist].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_pending_list(&bot.bot, &msg, &bot.pool, bot.config.admin_chat_id)
-                                .await
-                        },
-                    ))
-                    .branch(case![Command::Approveall].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_approve_all(&bot.bot, &msg, &bot.pool, bot.config.admin_chat_id)
-                                .await
-                        },
-                    ))
-                    .branch(case![Command::Rejectall].endpoint(
-                        move |msg: Message, bot: BotService| async move {
-                            handle_reject_all(&bot.bot, &msg, &bot.pool, bot.config.admin_chat_id)
-                                .await
-                        },
-                    )),
-            )
+            .branch(filter_command::<Command, _>().branch(
+                case![Command::Start].endpoint(move |msg: Message, bot: BotService| async move {
+                    bot.handle_start_command(msg).await
+                }),
+            ))
             .branch(Update::filter_my_chat_member().endpoint(
                 move |upd: ChatMemberUpdated, bot: BotService| async move {
                     bot.handle_my_chat_member_update(upd).await
