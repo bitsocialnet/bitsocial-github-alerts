@@ -1,0 +1,30 @@
+# Production deployment for bitsocial-github-alerts.
+# Copy this directory to the VPS, create a .env file next to it
+# (see .env.example in the repo root), then: docker compose up -d
+services:
+  app:
+    image: ghcr.io/bitsocialnet/bitsocial-github-alerts:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://alerts:${DATABASE_PASSWORD}@postgres/alerts
+    ports:
+      - "127.0.0.1:8090:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=alerts
+      - POSTGRES_DB=alerts
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alerts -d alerts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

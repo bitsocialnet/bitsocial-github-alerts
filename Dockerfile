@@ -9,6 +9,6 @@ RUN apt update && \
     apt install build-essential pkg-config libssl-dev libpq-dev ca-certificates -y && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder ./target/release/notifine ./target/release/notifine
-RUN chmod +x ./target/release/notifine
-CMD ["/target/release/notifine"]
+COPY --from=builder ./target/release/bitsocial-github-alerts ./target/release/bitsocial-github-alerts
+RUN chmod +x ./target/release/bitsocial-github-alerts
+CMD ["/target/release/bitsocial-github-alerts"]

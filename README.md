@@ -1,163 +1,88 @@
-<div align="center">
+# bitsocial-github-alerts
 
-<a href="https://notifine.com" align="center"><h1>notifine</h1></a>
+A Telegram bot that posts compact GitHub notifications — pushes, releases, issues, pull requests, and more — to any chat, group, or forum topic. Run by the [Bitsocial](https://github.com/bitsocialnet) team for its repositories, but anyone can self-host it.
 
-<p align="center">
-Bots for Telegram. Get notifications on new events like new commits, pipelines, etc.
-</p>
+This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), stripped down to GitHub + Telegram only, with compact message formatting and added support for GitHub release notifications. All credit for the original architecture goes to the notifine authors. This repository carries no license of its own because upstream notifine has none; licensing follows upstream.
 
-</div>
+## Features
 
-Notifine helps with events in your work tools like GitLab and GitHub. Just send a message to notifine or add it to your telegram group. It will provide you with a webhook link right away. Copy this link and paste it to your favorite tool.
+- **Compact messages** — pushes show at most 5 commits (first line of each commit message, truncated to 72 chars) plus an "… and N more" line
+- **Release notifications** — one-liner when a release is published, with tag link, release name, pre-release marker, and the first line of the release notes
+- **Supported events**: push (incl. branch create/delete and force-push), release, issues, pull requests, comments (issue/PR review/commit), check runs, workflow runs, wiki edits, ping
+- **Branch filtering** — `?branch=` / `?exclude_branch=` glob patterns on the webhook URL
+- **Forum topics** — run `/start` inside a Telegram topic to receive notifications there
+- Built with Rust (actix-web + teloxide + diesel/Postgres)
 
-- 🤖 [Gitlab bot](https://t.me/gitlab_notifine_bot)
-- 🤖 [Github bot](https://t.me/github_notifine_bot)
-- 🔔 [Beep bot](https://t.me/beep_notifine_bot) - Simple webhook notifications
-- 📊 [Uptime bot](https://t.me/uptime_notifine_bot) - Monitor website availability
+## Usage
 
----
+1. Open a chat with the bot (or add it to a group) and send `/start`
+2. The bot replies with a webhook URL of the form `https://github.bitsocial.net/github/<token>`
+3. In your GitHub repo, open **Settings → Webhooks → Add webhook**, paste the URL, set content type to `application/json`, and pick the events you want
 
-**Mar 18, 2023: Github bot has started working!**
+### Branch filtering
 
-**Dec 04, 2022: Gitlab bot has started working!**
+```
+# Only main
+https://github.bitsocial.net/github/<token>?branch=main
 
----
+# Multiple branches and wildcards
+https://github.bitsocial.net/github/<token>?branch=main,release/*
 
-## Available Notifications
-
-### Github and GitLab
-
-✅ Commit push
- ✅ Tag push
- ✅ Pipeline
- ✅ Pull request (via Job events)
- ✅ Job events
- ✅ Issue
- ✅ Comment
- ✅ Deployment notifications
-
-## ✨ Features
-
-**😎 100% open source and free**
-
-Backend (Rust) and infrastructure codes (AWS CDK) are open sources.
-
-**🚀 Uptime guarantee**
-
-There are some telegram bots available already. But they are not able to provide a continuous experience because of long downtimes. This is the main reason for the existence of notifine.
-
-Check the uptime status of the bots: https://stats.uptimerobot.com/5zQqxuMGNY
-
-<img src="./assets/uptime.png" alt="uptime robot screenshot" width="600px"/>
-
-**🎓 Educational purposes**
-
-I am planning to prepare a tutorial based on this project. And help new Rustaceans with an up-to-date Rust implementation.
-
-**⚡️ Built on Rust**
-
-Benefit Rust features of speed, type safety, async.
-
-**🔌 On premise available**
-
-If you want to host the bot on your private server.
-
-## Notes
-
-Gitlab sends a job event for each PR event. So, to avoid duplicate notifications, we use job events instead of PR events. If you want to test PR events, you should select Job event and click test on Gitlab
-
-**Telegram threads (topics) are now supported:**
-After adding the bot to the group, simply execute the /start command in the thread where you want to receive notifications.
-
-## Branch Filtering
-
-Both GitHub and GitLab webhooks support branch filtering to reduce notification noise from development branches. Add query parameters to your webhook URL to filter events by branch patterns.
-
-### Usage Examples
-
-```bash
-# Only receive notifications for main branch
-https://webhook.notifine.com/github/webhook123?branch=main
-https://webhook.notifine.com/gitlab/webhook123?branch=main
-
-# Multiple branches
-https://webhook.notifine.com/github/webhook123?branch=main,develop
-
-# Wildcard patterns
-https://webhook.notifine.com/github/webhook123?branch=release/*
-
-# Exclude development branches
-https://webhook.notifine.com/github/webhook123?exclude_branch=feature/*,dependabot/*
-
-# Combine include and exclude (exclude takes precedence)
-https://webhook.notifine.com/github/webhook123?branch=main,release/*&exclude_branch=*-wip,*-temp
+# Exclude noisy branches (exclusions take precedence)
+https://github.bitsocial.net/github/<token>?exclude_branch=feature/*,dependabot/*
 ```
 
-### Supported Events
+Applies to push, pull request, workflow run, and create/delete events.
 
-**GitHub:** Push events, Pull Request events, Workflow Run events, Create/Delete events
-**GitLab:** Push events, Merge Request events
+## Self-hosting
 
-### Filter Rules
+### Environment variables
 
-- **Include patterns** (`branch=`): Only process events for matching branches
-- **Exclude patterns** (`exclude_branch=`): Never process events for matching branches
-- **Precedence**: Exclusions take priority over inclusions
-- **Wildcards**: Use `*` for pattern matching (e.g., `feature/*`, `*-wip`)
-- **Multiple patterns**: Separate with commas (`main,develop,release/*`)
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | Postgres connection string |
+| `WEBHOOK_BASE_URL` | yes | Public base URL GitHub uses to reach the server, e.g. `https://github.bitsocial.net` |
+| `GITHUB_TELOXIDE_TOKEN` | yes | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `PORT` | no | HTTP listen port (default `8080`) |
+| `ADMIN_LOGS` | no | `ACTIVE` to send admin logs to Telegram (default `NOT_ACTIVE`) |
+| `TELEGRAM_ADMIN_CHAT_ID` | no | Chat id that receives admin logs |
+| `ADMIN_LOG_LEVEL` | no | 0–255 verbosity threshold for admin logs (default `50`) |
 
-### Backward Compatibility
+Database migrations are embedded and run automatically at startup.
 
-- Webhooks without branch filters continue to receive all events
-- GitLab's existing `?full_message=true` parameter still works alongside branch filtering
+### Docker Compose (production)
 
-## Configuration
-
-### Environment Variables
-
-The following environment variables are required for running Notifine:
+A production compose file is provided in [`deploy/docker-compose.yml`](deploy/docker-compose.yml). It runs the prebuilt image `ghcr.io/bitsocialnet/bitsocial-github-alerts:latest` next to a Postgres 17 container and binds the app to `127.0.0.1:8090` (put a reverse proxy such as Caddy or nginx in front).
 
 ```bash
-# Database
-DATABASE_URL=postgresql://user:password@localhost/notifine
-
-# Webhook base URL
-WEBHOOK_BASE_URL=https://webhook.notifine.com
-
-# Telegram Bot Tokens
-GITLAB_TELOXIDE_TOKEN=your_gitlab_bot_token
-GITHUB_TELOXIDE_TOKEN=your_github_bot_token
-BEEP_TELOXIDE_TOKEN=your_beep_bot_token
-UPTIME_TELOXIDE_TOKEN=your_uptime_bot_token
-
-# Admin Configuration
-ADMIN_LOGS=NOT_ACTIVE  # ACTIVE or NOT_ACTIVE
-ADMIN_LOG_LEVEL=0
-TELEGRAM_ADMIN_CHAT_ID=your_admin_chat_id
+mkdir bitsocial-github-alerts && cd bitsocial-github-alerts
+curl -fsSLO https://raw.githubusercontent.com/bitsocialnet/bitsocial-github-alerts/main/deploy/docker-compose.yml
+cat > .env <<'ENV'
+GITHUB_TELOXIDE_TOKEN=<bot token>
+WEBHOOK_BASE_URL=https://github.example.com
+DATABASE_PASSWORD=<random password>
+ENV
+docker compose up -d
 ```
 
-### Database Setup
+`DATABASE_URL` is derived from `DATABASE_PASSWORD` inside the compose file; the other variables come from `.env`.
 
-Run migrations to set up the database schema:
+### Local development
 
 ```bash
-# Install diesel CLI
-cargo install diesel_cli --no-default-features --features postgres
-
-# Run migrations
-diesel migration run
-
-# Or using Docker Compose
-docker-compose up -d
+cp .env.example .env   # fill in values
+docker compose up -d bitsocial-github-alerts-db
+cargo run
 ```
 
-## Ways to help
+## Docker image
 
-Regardless of your experience level, there are ways that you can help:
+Images are published to GHCR on every push to `main` and on version tags:
 
-- Share the project on Twitter
-- Star the project on GitHub
-- Tell your friends/co-workers about Notifine
-- Write an article about Notifine on Medium, Dev, or your platform of choice
-- Report bugs or provide feedback by [creating issues](https://github.com/mhkafadar/gitlab-telegram/issues)
-- Contribute to the source code by fixing bugs/issues or helping us build new features
+```
+ghcr.io/bitsocialnet/bitsocial-github-alerts:latest
+```
+
+## Credits
+
+Forked from [mhkafadar/notifine](https://github.com/mhkafadar/notifine). Report bugs for this fork by [creating an issue](https://github.com/bitsocialnet/bitsocial-github-alerts/issues/new).

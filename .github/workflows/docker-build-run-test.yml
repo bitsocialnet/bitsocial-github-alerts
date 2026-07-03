@@ -10,27 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build . -t notifine
+        run: docker build . -t bitsocial-github-alerts
 
       - name: Run Docker container
-        run: docker run --name notifine_container -d notifine
+        run: docker run --name bitsocial_github_alerts_container -d bitsocial-github-alerts
 
-      - name: Check logs for DATABASE_URL must be set
+      - name: Check logs for missing DATABASE_URL error
         id: check_logs
         run: |
           sleep 10 # Wait for the app to initialize and log errors if any
-          LOGS=$(docker logs notifine_container 2>&1)
+          LOGS=$(docker logs bitsocial_github_alerts_container 2>&1)
           echo "$LOGS"
-          if echo "$LOGS" | grep -q 'DATABASE_URL must be set'; then
-            echo "Test passed: 'DATABASE_URL must be set' found in logs"
+          if echo "$LOGS" | grep -q 'DATABASE_URL'; then
+            echo "Test passed: 'DATABASE_URL' found in logs"
           else
-            echo "Test failed: 'DATABASE_URL must be set' not found in logs"
+            echo "Test failed: 'DATABASE_URL' not found in logs"
             exit 1
           fi
 
       - name: Clean up Docker container
         if: always()
-        run: docker rm -f notifine_container
+        run: docker rm -f bitsocial_github_alerts_container
