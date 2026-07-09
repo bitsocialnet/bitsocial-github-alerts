@@ -50,3 +50,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Redeploy on VPS
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # the key is restricted on the server to only run the redeploy script
+          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFzZ0UkzCNqtvevsZiUB7UcfsZLnfBmepNMlx7+Xwsx4\n' "$HOST" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes root@"$HOST" deploy
