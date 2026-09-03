@@ -8,6 +8,7 @@ This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), s
 
 - **Compact messages** — pushes show at most 5 commits (first line of each commit message, truncated to 72 chars) plus an "… and N more" line
 - **Release notifications** — one-liner when a release is published, with tag link, release name, pre-release marker, and the first line of the release notes
+- **Dependabot suppression** — events from Dependabot and activity on `dependabot/*` branches are acknowledged without posting to Telegram
 - **Supported events**: push (incl. branch create/delete and force-push), release, issues, pull requests, comments (issue/PR review/commit), check runs, workflow runs, wiki edits, ping
 - **Branch filtering** — `?branch=` / `?exclude_branch=` glob patterns on the webhook URL
 - **Forum topics** — run `/start` inside a Telegram topic to receive notifications there

@@ -8,7 +8,7 @@ pub mod push;
 pub mod release;
 #[cfg(test)]
 mod test_branch_filtering;
-mod utils;
+pub(super) mod utils;
 pub mod wiki;
 pub mod workflow_run;
 
