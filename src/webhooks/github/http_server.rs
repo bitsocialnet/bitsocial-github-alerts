@@ -1,6 +1,8 @@
 use crate::utils::branch_filter::BranchFilter;
 use crate::webhooks::common::{process_webhook, WebhookContext};
-use crate::webhooks::github::dependabot_filter::is_dependabot_event;
+use crate::webhooks::github::dependabot_filter::{
+    has_skip_notification_marker, is_dependabot_event,
+};
 use crate::webhooks::github::webhook_handlers::{
     handle_check_run_event, handle_comment_event, handle_create_event, handle_delete_event,
     handle_issue_event, handle_ping_event, handle_pull_request_event, handle_push_event,
@@ -41,6 +43,11 @@ pub async fn handle_github_webhook(
 
         if is_dependabot_event(&body) {
             tracing::info!("Suppressing Dependabot webhook event: {}", event_str);
+            return HttpResponse::Ok().finish();
+        }
+
+        if event_str == "push" && has_skip_notification_marker(&body) {
+            tracing::info!("Suppressing GitHub push event with notification skip marker");
             return HttpResponse::Ok().finish();
         }
 

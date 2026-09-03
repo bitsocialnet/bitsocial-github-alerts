@@ -1,6 +1,8 @@
 use super::webhook_handlers::utils::parse_webhook_payload;
 use serde_json::Value;
 
+pub const SKIP_NOTIFICATION_MARKER: &str = "[skip github-alerts]";
+
 const IDENTITY_PATHS: &[&[&str]] = &[
     &["sender", "login"],
     &["actor", "login"],
@@ -25,9 +27,8 @@ const BRANCH_PATHS: &[&[&str]] = &[
 /// `dependabot/*` branch. The branch rule also gives maintainers a predictable
 /// way to perform manual dependency remediation without Telegram noise.
 pub fn is_dependabot_event(body: &[u8]) -> bool {
-    let payload: Value = match parse_webhook_payload(body) {
-        Ok(payload) => payload,
-        Err(_) => return false,
+    let Some(payload) = parse_payload(body) else {
+        return false;
     };
 
     IDENTITY_PATHS
@@ -38,6 +39,32 @@ pub fn is_dependabot_event(body: &[u8]) -> bool {
             .iter()
             .filter_map(|path| string_at_path(&payload, path))
             .any(is_dependabot_branch)
+}
+
+/// Returns true when a push contains the explicit opt-out marker in any commit
+/// message. This supports quiet, maintainer-authored dependency sweeps directly
+/// on the default branch without guessing from filenames or package metadata.
+pub fn has_skip_notification_marker(body: &[u8]) -> bool {
+    let Some(payload) = parse_payload(body) else {
+        return false;
+    };
+
+    string_at_path(&payload, &["head_commit", "message"]).is_some_and(contains_skip_marker)
+        || payload
+            .get("commits")
+            .and_then(Value::as_array)
+            .is_some_and(|commits| {
+                commits.iter().any(|commit| {
+                    commit
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(contains_skip_marker)
+                })
+            })
+}
+
+fn parse_payload(body: &[u8]) -> Option<Value> {
+    parse_webhook_payload(body).ok()
 }
 
 fn string_at_path<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -58,6 +85,12 @@ fn is_dependabot_branch(value: &str) -> bool {
     let branch = branch.split_once(':').map_or(branch, |(_, name)| name);
 
     branch == "dependabot" || branch.starts_with("dependabot/")
+}
+
+fn contains_skip_marker(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains(SKIP_NOTIFICATION_MARKER)
 }
 
 #[cfg(test)]
@@ -131,5 +164,34 @@ mod tests {
     #[test]
     fn malformed_payload_is_not_suppressed() {
         assert!(!is_dependabot_event(b"not json"));
+    }
+
+    #[test]
+    fn suppresses_push_with_skip_marker_in_head_commit() {
+        let body = payload(json!({
+            "head_commit": {"message": "chore(deps): refresh locks [skip github-alerts]"},
+            "commits": []
+        }));
+        assert!(has_skip_notification_marker(&body));
+    }
+
+    #[test]
+    fn suppresses_form_encoded_push_with_case_insensitive_marker() {
+        let json = json!({
+            "head_commit": null,
+            "commits": [{"message": "chore(deps): refresh locks [SKIP GITHUB-ALERTS]"}]
+        })
+        .to_string();
+        let body = serde_urlencoded::to_string([("payload", json)]).unwrap();
+        assert!(has_skip_notification_marker(body.as_bytes()));
+    }
+
+    #[test]
+    fn does_not_suppress_push_without_exact_marker() {
+        let body = payload(json!({
+            "head_commit": {"message": "document skip github alerts behavior"},
+            "commits": []
+        }));
+        assert!(!has_skip_notification_marker(&body));
     }
 }
