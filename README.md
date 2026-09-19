@@ -59,7 +59,7 @@ A production compose file is provided in [`deploy/docker-compose.yml`](deploy/do
 
 ```bash
 mkdir bitsocial-github-alerts && cd bitsocial-github-alerts
-curl -fsSLO https://raw.githubusercontent.com/bitsocialnet/bitsocial-github-alerts/main/deploy/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/bitsocialnet/bitsocial-github-alerts/master/deploy/docker-compose.yml
 cat > .env <<'ENV'
 GITHUB_TELOXIDE_TOKEN=<bot token>
 WEBHOOK_BASE_URL=https://github.example.com
@@ -80,7 +80,7 @@ cargo run
 
 ## Docker image
 
-Images are published to GHCR on every push to `main` and on version tags:
+Images are published to GHCR on every push to `master` and on version tags:
 
 ```
 ghcr.io/bitsocialnet/bitsocial-github-alerts:latest
