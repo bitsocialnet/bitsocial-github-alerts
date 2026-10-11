@@ -9,6 +9,7 @@ services:
       - telegram_bots
     environment:
       - GITHUB_TELOXIDE_TOKEN=${GITHUB_TELOXIDE_TOKEN}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET is required}
       - DATABASE_URL=postgresql://admin:${DATABASE_PASSWORD}@bitsocial-github-alerts-db
       - WEBHOOK_BASE_URL=${WEBHOOK_BASE_URL}
       - RUST_BACKTRACE=1

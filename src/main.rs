@@ -87,7 +87,7 @@ async fn main() {
 
     alert_startup_success().await;
 
-    if let Err(e) = run_http_server(pool).await {
+    if let Err(e) = run_http_server(pool, config.github_webhook_security.clone()).await {
         let error_msg = format!("{}", e);
         alert_http_server_error(&error_msg).await;
         std::process::exit(1);

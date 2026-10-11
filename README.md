@@ -13,6 +13,7 @@ This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), s
 - **Supported events**: push (incl. branch create/delete and force-push), release, issues (incl. transfers), pull requests, comments (issue/PR review/commit), check runs, workflow runs, wiki edits, ping
 - **Issue transfers** — reported once, from the source repository, naming who moved the issue and where it landed; the destination repository's `opened` event is dropped because GitHub sends it with the original author as sender
 - **Branch filtering** — `?branch=` / `?exclude_branch=` glob patterns on the webhook URL
+- **Authenticated deliveries** — verifies HMAC-SHA256 signatures and accepts only the GitHub organization IDs of `bitsocialnet`, `bitsocialforge`, and `pkcprotocol`
 - **Forum topics** — run `/start` inside a Telegram topic to receive notifications there
 - Built with Rust (actix-web + teloxide + diesel/Postgres)
 
@@ -20,7 +21,10 @@ This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), s
 
 1. Open a chat with the bot (or add it to a group) and send `/start`
 2. The bot replies with a webhook URL of the form `https://github.bitsocial.net/github/<token>`
-3. In your GitHub repo, open **Settings → Webhooks → Add webhook**, paste the URL, set content type to `application/json`, and pick the events you want
+3. In a repository owned by an allowed organization, open **Settings → Webhooks → Add webhook**, paste the URL, set content type to `application/json`, and pick the events you want
+4. Set **Secret** to the server's `GITHUB_WEBHOOK_SECRET`, supplied privately by the operator. Keep SSL verification enabled. Never put the secret in the URL or a repository.
+
+Both JSON and form-encoded deliveries are supported. The server validates the signature over the original request bytes before parsing, filtering, or sending notifications. Missing or invalid signatures return `401`; owners outside the allowlist return `403`. The allowlist uses immutable organization IDs, so another account cannot gain access by taking an old organization name. Organization-hook pings are also supported. Self-hosters serving other organizations must change the IDs in `src/webhooks/github/security.rs`.
 
 ### Branch filtering
 
@@ -46,12 +50,15 @@ Applies to push, pull request, workflow run, and create/delete events.
 | `DATABASE_URL` | yes | Postgres connection string |
 | `WEBHOOK_BASE_URL` | yes | Public base URL GitHub uses to reach the server, e.g. `https://github.bitsocial.net` |
 | `GITHUB_TELOXIDE_TOKEN` | yes | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `GITHUB_WEBHOOK_SECRET` | yes | Random signing secret of at least 32 bytes, identical to the Secret setting on every connected GitHub webhook |
 | `PORT` | no | HTTP listen port (default `8080`) |
 | `ADMIN_LOGS` | no | `ACTIVE` to send admin logs to Telegram (default `NOT_ACTIVE`) |
 | `TELEGRAM_ADMIN_CHAT_ID` | no | Chat id that receives admin logs |
 | `ADMIN_LOG_LEVEL` | no | 0–255 verbosity threshold for admin logs (default `50`) |
 
 Database migrations are embedded and run automatically at startup.
+
+Generate the webhook secret with `openssl rand -hex 32` and store it privately. The app refuses to start with a missing or short secret. For an existing deployment, configure the secret on every connected GitHub webhook and in the server environment before deploying signature enforcement. New webhooks also require this secret; copying the URL alone is insufficient. To rotate it, coordinate updates to the server and all connected hooks.
 
 ### Docker Compose (production)
 
@@ -62,6 +69,7 @@ mkdir bitsocial-github-alerts && cd bitsocial-github-alerts
 curl -fsSLO https://raw.githubusercontent.com/bitsocialnet/bitsocial-github-alerts/master/deploy/docker-compose.yml
 cat > .env <<'ENV'
 GITHUB_TELOXIDE_TOKEN=<bot token>
+GITHUB_WEBHOOK_SECRET=<random webhook secret>
 WEBHOOK_BASE_URL=https://github.example.com
 DATABASE_PASSWORD=<random password>
 ENV

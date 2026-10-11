@@ -1,3 +1,4 @@
+use crate::webhooks::github::security::WebhookSecurity;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -11,6 +12,7 @@ pub struct AppConfig {
     pub admin_log_level: u8,
 
     pub github_token: String,
+    pub github_webhook_security: WebhookSecurity,
 }
 
 #[derive(Debug)]
@@ -61,6 +63,16 @@ impl AppConfig {
         let database_url = get_required("DATABASE_URL", &mut missing);
         let webhook_base_url = get_required("WEBHOOK_BASE_URL", &mut missing);
         let github_token = get_required("GITHUB_TELOXIDE_TOKEN", &mut missing);
+        let github_webhook_security =
+            get_required("GITHUB_WEBHOOK_SECRET", &mut missing).and_then(|secret| {
+                match WebhookSecurity::new(&secret) {
+                    Ok(security) => Some(security),
+                    Err(error) => {
+                        invalid.push(("GITHUB_WEBHOOK_SECRET".into(), error.into()));
+                        None
+                    }
+                }
+            });
 
         let admin_logs = get_optional("ADMIN_LOGS").unwrap_or_else(|| "NOT_ACTIVE".into());
 
@@ -100,6 +112,7 @@ impl AppConfig {
             admin_chat_id,
             admin_log_level,
             github_token: github_token.unwrap(),
+            github_webhook_security: github_webhook_security.unwrap(),
         })
     }
 
