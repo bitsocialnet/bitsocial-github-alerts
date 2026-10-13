@@ -145,12 +145,14 @@ impl BotService {
             )
         } else {
             format!(
-                "This webhook connects GitHub notifications to this Telegram chat.\n\n\
-                 Only repositories in bitsocialnet, bitsocialforge, and pkcprotocol are supported.\n\n\
-                 In your repository's Settings → Webhooks, add this URL:\n{}/{}/{}\n\n\
-                 Set the Secret field to the signing secret provided privately by an administrator. \
-                 Do not share the secret in this chat.\n\n\
-                 Existing configured webhooks need no changes.",
+                "Organization webhooks automatically cover current and future public repositories \
+                 in bitsocialnet, bitsocialforge, and pkcprotocol. Private repositories are excluded.\n\n\
+                 New repositories need no webhook setup. Alerts go to the chat selected by each \
+                 organization's webhook.\n\n\
+                 To connect or change the destination, ask an administrator to configure the \
+                 organization webhook with this chat's URL:\n{}/{}/{}\n\n\
+                 Administrators must set the signing secret privately and keep SSL verification enabled. \
+                 Do not share the secret in this chat or add duplicate repository webhooks.",
                 self.config.webhook_base_url,
                 bot_name.to_lowercase(),
                 webhook_info.webhook_url

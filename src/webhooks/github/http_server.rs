@@ -31,6 +31,12 @@ pub async fn handle_github_webhook(
 ) -> impl Responder {
     // Reject unauthenticated or foreign deliveries before filters, payload logs, DB or Telegram.
     if let Err(rejection) = security.authorize(req.headers(), &body) {
+        if rejection == WebhookRejection::NonPublicRepository {
+            tracing::info!(
+                "Ignoring GitHub webhook for a non-public or unknown-visibility repository"
+            );
+            return HttpResponse::Ok().finish();
+        }
         tracing::warn!("Rejected GitHub webhook: {:?}", rejection);
         return match rejection {
             WebhookRejection::InvalidSignature => HttpResponse::Unauthorized().finish(),
@@ -38,6 +44,7 @@ pub async fn handle_github_webhook(
             WebhookRejection::InvalidEvent | WebhookRejection::InvalidPayload => {
                 HttpResponse::BadRequest().finish()
             }
+            WebhookRejection::NonPublicRepository => unreachable!("handled above"),
         };
     }
 
@@ -145,7 +152,7 @@ mod security_tests {
             (245761493, true, StatusCode::OK),
         ] {
             let json = json!({
-                "repository": {"owner": {"id": owner, "type": "Organization"}},
+                "repository": {"private": false, "owner": {"id": owner, "type": "Organization"}},
                 "head_commit": {"message": "[skip github-alerts] security test"}
             })
             .to_string();
@@ -184,6 +191,64 @@ mod security_tests {
                 .to_request();
             let response = test::call_service(&app, request).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // These have no Dependabot sender or skip marker. A 200 response proves
+        // excluded content cannot reach formatting, database access or Telegram.
+        for owner in [243813100_u64, 296465714, 245761493, 1] {
+            for private in [
+                None,
+                Some(json!(true)),
+                Some(json!(null)),
+                Some(json!("false")),
+            ] {
+                let mut payload = json!({
+                    "repository": {"owner": {"id": owner, "type": "Organization"}},
+                    "action": "opened",
+                    "issue": {"title": "private content must never be processed"}
+                });
+                if let Some(value) = private {
+                    payload["repository"]["private"] = value;
+                }
+                let json = payload.to_string();
+                let form = serde_urlencoded::to_string([("payload", &json)]).unwrap();
+                for event in ["push", "issues", "release", "ping"] {
+                    for (body, content_type) in [
+                        (&json, "application/json"),
+                        (&form, "application/x-www-form-urlencoded"),
+                    ] {
+                        for signed in [false, true] {
+                            let mut request = test::TestRequest::post()
+                                .uri("/github/test-destination")
+                                .insert_header(("content-type", content_type))
+                                .insert_header(("x-github-event", event))
+                                .set_payload(body.clone());
+                            if signed {
+                                let mut mac =
+                                    Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+                                mac.update(body.as_bytes());
+                                request = request.insert_header((
+                                    "x-hub-signature-256",
+                                    format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+                                ));
+                            }
+                            let expected = if !signed {
+                                StatusCode::UNAUTHORIZED
+                            } else if owner == 1 {
+                                StatusCode::FORBIDDEN
+                            } else {
+                                StatusCode::OK
+                            };
+                            let response = test::call_service(&app, request.to_request()).await;
+                            assert_eq!(
+                                response.status(),
+                                expected,
+                                "owner={owner}, signed={signed}, event={event}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

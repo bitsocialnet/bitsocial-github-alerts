@@ -25,6 +25,7 @@ pub enum WebhookRejection {
     InvalidEvent,
     InvalidPayload,
     DisallowedOwner,
+    NonPublicRepository,
 }
 
 impl WebhookSecurity {
@@ -59,6 +60,17 @@ impl WebhookSecurity {
             parse_webhook_payload(body).map_err(|_| WebhookRejection::InvalidPayload)?;
         if !allowed_owner(&payload, event) {
             return Err(WebhookRejection::DisallowedOwner);
+        }
+        if let Some(repository) = payload.get("repository") {
+            // Fail closed if visibility is missing, malformed, or inconsistent.
+            // GitHub push payloads may omit `visibility`, but must say `private: false`.
+            if repository["private"].as_bool() != Some(false)
+                || repository
+                    .get("visibility")
+                    .is_some_and(|visibility| visibility.as_str() != Some("public"))
+            {
+                return Err(WebhookRejection::NonPublicRepository);
+            }
         }
         Ok(())
     }
@@ -131,7 +143,7 @@ mod tests {
     }
 
     fn repository_payload(id: u64) -> Value {
-        json!({"repository": {"owner": {"id": id, "type": "Organization"}}})
+        json!({"repository": {"private": false, "owner": {"id": id, "type": "Organization"}}})
     }
 
     #[test]
@@ -249,6 +261,67 @@ mod tests {
             &json!({"repository": {"owner": {"id": id, "type": "Organization"}}, "organization": {"id": id}}),
             "issues"
         ));
+    }
+
+    #[test]
+    fn excludes_private_and_uncertain_visibility_in_json_and_form_data() {
+        for private in [
+            None,
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!(null)),
+            Some(json!("false")),
+        ] {
+            for visibility in [
+                None,
+                Some(json!("public")),
+                Some(json!("private")),
+                Some(json!("internal")),
+                Some(json!(null)),
+            ] {
+                let mut payload = repository_payload(ALLOWED_ORGANIZATION_IDS[0]);
+                let repository = payload["repository"].as_object_mut().unwrap();
+                repository.remove("private");
+                if let Some(value) = &private {
+                    repository.insert("private".into(), value.clone());
+                }
+                if let Some(value) = &visibility {
+                    repository.insert("visibility".into(), value.clone());
+                }
+                let is_public = private == Some(json!(false))
+                    && visibility.as_ref().is_none_or(|value| value == "public");
+                let json = payload.to_string();
+                let form = serde_urlencoded::to_string([("payload", &json)]).unwrap();
+                for event in ["push", "issues", "release", "ping"] {
+                    for body in [json.as_bytes(), form.as_bytes()] {
+                        let result = security().authorize(&signed_headers(body, event), body);
+                        if is_public {
+                            assert_eq!(result, Ok(()));
+                        } else {
+                            assert_eq!(result, Err(WebhookRejection::NonPublicRepository));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn permits_signed_organization_pings_without_repository_visibility() {
+        for id in ALLOWED_ORGANIZATION_IDS {
+            let json = json!({"organization": {"id": id}}).to_string();
+            let form = serde_urlencoded::to_string([("payload", &json)]).unwrap();
+            for body in [json.as_bytes(), form.as_bytes()] {
+                assert_eq!(
+                    security().authorize(&signed_headers(body, "ping"), body),
+                    Ok(())
+                );
+                assert_eq!(
+                    security().authorize(&signed_headers(body, "push"), body),
+                    Err(WebhookRejection::DisallowedOwner)
+                );
+            }
+        }
     }
 
     #[test]

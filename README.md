@@ -14,17 +14,25 @@ This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), s
 - **Issue transfers** — reported once, from the source repository, naming who moved the issue and where it landed; the destination repository's `opened` event is dropped because GitHub sends it with the original author as sender
 - **Branch filtering** — `?branch=` / `?exclude_branch=` glob patterns on the webhook URL
 - **Authenticated deliveries** — verifies HMAC-SHA256 signatures and accepts only the GitHub organization IDs of `bitsocialnet`, `bitsocialforge`, and `pkcprotocol`
+- **Public repositories only** — private repositories and missing or inconsistent visibility are acknowledged without payload logging or Telegram notifications
 - **Forum topics** — run `/start` inside a Telegram topic to receive notifications there
 - Built with Rust (actix-web + teloxide + diesel/Postgres)
 
 ## Usage
 
-1. Open a chat with the bot (or add it to a group) and send `/start`
-2. The bot replies with a webhook URL of the form `https://github.bitsocial.net/github/<token>`
-3. In a repository owned by an allowed organization, open **Settings → Webhooks → Add webhook**, paste the URL, set content type to `application/json`, and pick the events you want
+Organization webhooks cover current and future public repositories in `bitsocialnet`, `bitsocialforge`, and `pkcprotocol`. New repositories need no individual webhook or secret setup. Private repositories are excluded from notifications.
+
+To configure an organization's Telegram destination (organization owners only):
+
+1. Open the destination chat or topic with the bot (or add it to a group) and send `/start`.
+2. The bot replies with that chat's webhook URL of the form `https://github.bitsocial.net/github/<token>`; sending `/start` alone does not change the organization's destination.
+3. In the organization's **Settings → Webhooks**, configure one webhook with the URL, content type `application/json`, and the desired events. The hosted setup subscribes to pushes, issues, and releases.
 4. Set **Secret** to the server's `GITHUB_WEBHOOK_SECRET`, supplied privately by the operator. Keep SSL verification enabled. Never put the secret in the URL or a repository.
+5. Verify a successful organization-hook delivery, then disable repository hooks pointing to the same destination to prevent duplicate alerts.
 
 Both JSON and form-encoded deliveries are supported. The server validates the signature over the original request bytes before parsing, filtering, or sending notifications. Missing or invalid signatures return `401`; owners outside the allowlist return `403`. The allowlist uses immutable organization IDs, so another account cannot gain access by taking an old organization name. Organization-hook pings are also supported. Self-hosters serving other organizations must change the IDs in `src/webhooks/github/security.rs`.
+
+GitHub sends organization webhooks for private repositories too. After authentication and owner checks, the bot returns `200` without processing or logging their contents. Repository events require `private: false`; if `visibility` is present, it must be `public`. Missing or inconsistent visibility is ignored. Organization pings without a repository remain supported.
 
 ### Branch filtering
 
