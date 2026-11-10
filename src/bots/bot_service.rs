@@ -3,7 +3,7 @@ use crate::observability::{ALERTS, METRICS};
 use crate::utils::telegram_admin::send_message_to_admin;
 use bitsocial_github_alerts::db::DbPool;
 use bitsocial_github_alerts::{
-    deactivate_chat, get_webhook_url_or_create, WebhookGetOrCreateInput,
+    deactivate_chat, get_webhook_url_or_create, TopicChange, WebhookGetOrCreateInput,
 };
 use html_escape::encode_text;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler};
@@ -12,7 +12,10 @@ use teloxide::macros::BotCommands;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::LoggingErrorHandler;
 use teloxide::prelude::{ChatId, ChatMemberUpdated, Message, Requester, ResponseResult, Update};
-use teloxide::types::{ChatMemberKind, ParseMode};
+use teloxide::types::{
+    Chat, ChatKind, ChatMemberKind, ChatPublic, MessageKind, ParseMode, PublicChatKind,
+    PublicChatSupergroup,
+};
 use teloxide::{dptree, filter_command, Bot, RequestError};
 
 const ISSUES_URL: &str = "https://github.com/bitsocialnet/bitsocial-github-alerts/issues/new";
@@ -34,7 +37,7 @@ pub struct BotService {
 
 pub struct StartCommand {
     pub chat_id: i64,
-    pub thread_id: Option<i32>,
+    pub topic: TopicChange,
     pub inviter_username: Option<String>,
     pub chat_title: Option<String>,
 }
@@ -58,6 +61,31 @@ enum Command {
     Start,
 }
 
+/// Where a /start asks alerts to go. Only messages Telegram marks as topic
+/// messages name a topic: message_thread_id is also set on replies outside
+/// topics, where it is not a valid send destination. In a chat without topics
+/// a stored topic is cleared (topics were turned off, or an invalid one was
+/// stored). In a forum's General topic the stored topic is kept, because that
+/// is where members send /start to see the URL again.
+fn start_topic(msg: &Message) -> TopicChange {
+    let in_topic = matches!(&msg.kind, MessageKind::Common(common) if common.is_topic_message);
+    match msg.thread_id {
+        Some(thread_id) if in_topic => TopicChange::Set(thread_id),
+        _ if is_forum(&msg.chat) => TopicChange::Keep,
+        _ => TopicChange::Clear,
+    }
+}
+
+fn is_forum(chat: &Chat) -> bool {
+    matches!(
+        &chat.kind,
+        ChatKind::Public(ChatPublic {
+            kind: PublicChatKind::Supergroup(PublicChatSupergroup { is_forum: true, .. }),
+            ..
+        })
+    )
+}
+
 impl BotService {
     pub fn new(config: BotConfig, pool: DbPool) -> Self {
         BotService {
@@ -74,12 +102,12 @@ impl BotService {
             None => None,
         };
 
-        let thread_id = msg.thread_id;
+        let topic = start_topic(&msg);
         let chat_title = msg.chat.title().map(|t| t.to_string());
 
         self.handle_new_chat_and_start_command(StartCommand {
             chat_id: msg.chat.id.0,
-            thread_id,
+            topic,
             inviter_username,
             chat_title,
         })
@@ -94,20 +122,23 @@ impl BotService {
     ) -> ResponseResult<()> {
         let StartCommand {
             chat_id,
-            thread_id,
+            topic,
             inviter_username,
             chat_title: _,
         } = start_command;
         let bot_name = &self.config.bot_name;
 
-        let thread_id_str = thread_id.map(|tid| tid.to_string());
-        let thread_id_ref = thread_id_str.as_deref();
+        // Replies go to the topic the command was sent in.
+        let thread_id = match topic {
+            TopicChange::Set(thread_id) => Some(thread_id),
+            TopicChange::Keep | TopicChange::Clear => None,
+        };
 
         let webhook_info = match get_webhook_url_or_create(
             &self.pool,
             WebhookGetOrCreateInput {
                 telegram_chat_id: chat_id.to_string().as_str(),
-                telegram_thread_id: thread_id_ref,
+                topic,
             },
         ) {
             Ok(info) => info,
@@ -206,7 +237,7 @@ impl BotService {
         if action == MembershipAction::Register {
             self.handle_new_chat_and_start_command(StartCommand {
                 chat_id,
-                thread_id: None,
+                topic: TopicChange::Keep,
                 inviter_username: update.from.username,
                 chat_title,
             })
@@ -501,5 +532,68 @@ mod tests {
             "my_chat_member update was not handled"
         );
         assert!(METRICS.churned_chats.load(Ordering::Relaxed) > churn_before);
+    }
+
+    fn start_message(extra: serde_json::Value) -> Message {
+        let mut message = json!({
+            "message_id": 20,
+            "date": 1700000000,
+            "chat": {"id": -1001234567890_i64, "type": "supergroup", "title": "Alerts"},
+            "from": {"id": 2, "is_bot": false, "first_name": "Admin"},
+            "text": "/start"
+        });
+        message
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_str(&message.to_string()).unwrap()
+    }
+
+    fn forum_chat() -> serde_json::Value {
+        json!({"id": -1001234567890_i64, "type": "supergroup", "title": "Alerts", "is_forum": true})
+    }
+
+    #[test]
+    fn start_inside_a_forum_topic_uses_that_topic() {
+        let msg = start_message(json!({
+            "chat": forum_chat(),
+            "message_thread_id": 4,
+            "is_topic_message": true
+        }));
+        assert_eq!(start_topic(&msg), TopicChange::Set(4));
+    }
+
+    #[test]
+    fn start_as_a_reply_outside_a_topic_uses_no_topic() {
+        // Telegram also sets message_thread_id on replies outside forum topics,
+        // where it is a message id that sendMessage rejects as a topic.
+        let msg = start_message(json!({"message_thread_id": 10}));
+        assert_eq!(start_topic(&msg), TopicChange::Clear);
+    }
+
+    #[test]
+    fn start_in_a_chat_without_topics_clears_the_stored_topic() {
+        // Topics were turned off, or an invalid topic was stored before:
+        // alerts must go to the chat itself again.
+        let chats = [
+            json!({"id": -1001234567890_i64, "type": "supergroup", "title": "Alerts"}),
+            json!({"id": -1234567890_i64, "type": "group", "title": "Alerts"}),
+            json!({"id": 2, "type": "private", "first_name": "Admin"}),
+        ];
+        for chat in chats {
+            let msg = start_message(json!({ "chat": chat }));
+            assert_eq!(start_topic(&msg), TopicChange::Clear, "{chat}");
+        }
+    }
+
+    #[test]
+    fn start_in_the_general_topic_keeps_the_stored_topic() {
+        // Members use /start in General to see the URL again; that must not
+        // pull alerts out of the topic they were sent to.
+        let general = start_message(json!({ "chat": forum_chat() }));
+        let reply_in_general =
+            start_message(json!({"chat": forum_chat(), "message_thread_id": 10}));
+        assert_eq!(start_topic(&general), TopicChange::Keep);
+        assert_eq!(start_topic(&reply_in_general), TopicChange::Keep);
     }
 }
