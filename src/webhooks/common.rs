@@ -232,10 +232,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                                 METRICS.increment_messages_sent_for_bot(ctx.source);
                                 recovery_succeeded = true;
                                 ALERTS
-                                    .send_alert(
+                                    .send_chat_alert(
                                         &bot.bot,
                                         Severity::Info,
                                         "Chat-Migrated",
+                                        telegram_chat_id,
                                         &format!(
                                             "Chat migrated from {} to {}",
                                             telegram_chat_id, new_chat_id
@@ -291,10 +292,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         );
                     } else {
                         ALERTS
-                            .send_alert(
+                            .send_chat_alert(
                                 &bot.bot,
                                 Severity::Warning,
                                 "Bot-Deactivated",
+                                telegram_chat_id,
                                 &format!(
                                     "Chat {} deactivated (error: {:?})",
                                     telegram_chat_id, error_kind
