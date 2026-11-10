@@ -6,14 +6,14 @@ use bitsocial_github_alerts::{
     deactivate_chat, get_webhook_url_or_create, WebhookGetOrCreateInput,
 };
 use html_escape::encode_text;
-use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
+use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler};
 use teloxide::dptree::case;
 use teloxide::macros::BotCommands;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::LoggingErrorHandler;
 use teloxide::prelude::{ChatId, ChatMemberUpdated, Message, Requester, ResponseResult, Update};
 use teloxide::types::{ChatMemberKind, ParseMode};
-use teloxide::{dptree, filter_command, Bot};
+use teloxide::{dptree, filter_command, Bot, RequestError};
 
 const ISSUES_URL: &str = "https://github.com/bitsocialnet/bitsocial-github-alerts/issues/new";
 
@@ -197,10 +197,13 @@ impl BotService {
             update.new_chat_member
         );
 
-        let old_kind = &update.old_chat_member.kind;
-        let new_kind = &update.new_chat_member.kind;
+        let action = membership_action(
+            update.chat.is_channel(),
+            &update.old_chat_member.kind,
+            &update.new_chat_member.kind,
+        );
 
-        if *old_kind == ChatMemberKind::Left && *new_kind == ChatMemberKind::Member {
+        if action == MembershipAction::Register {
             self.handle_new_chat_and_start_command(StartCommand {
                 chat_id,
                 thread_id: None,
@@ -208,13 +211,7 @@ impl BotService {
                 chat_title,
             })
             .await?
-        } else if matches!(
-            old_kind,
-            ChatMemberKind::Member | ChatMemberKind::Administrator { .. }
-        ) && matches!(
-            new_kind,
-            ChatMemberKind::Left | ChatMemberKind::Banned { .. }
-        ) {
+        } else if action == MembershipAction::Deactivate {
             tracing::info!("Bot removed from chat {}", chat_id);
             METRICS.increment_churn();
 
@@ -271,20 +268,28 @@ impl BotService {
         Ok(())
     }
 
-    pub async fn run_bot(self) {
-        let handler = Update::filter_message()
-            .branch(filter_command::<Command, _>().branch(
-                case![Command::Start].endpoint(move |msg: Message, bot: BotService| async move {
-                    bot.handle_start_command(msg).await
-                }),
-            ))
+    // Message and my_chat_member updates are siblings: a branch nested under
+    // filter_message() only ever sees message updates.
+    fn update_handler() -> UpdateHandler<RequestError> {
+        dptree::entry()
+            .branch(
+                Update::filter_message().branch(filter_command::<Command, _>().branch(
+                    case![Command::Start].endpoint(
+                        move |msg: Message, bot: BotService| async move {
+                            bot.handle_start_command(msg).await
+                        },
+                    ),
+                )),
+            )
             .branch(Update::filter_my_chat_member().endpoint(
                 move |upd: ChatMemberUpdated, bot: BotService| async move {
                     bot.handle_my_chat_member_update(upd).await
                 },
-            ));
+            ))
+    }
 
-        Dispatcher::builder(self.bot.clone(), handler)
+    pub async fn run_bot(self) {
+        Dispatcher::builder(self.bot.clone(), Self::update_handler())
             .dependencies(dptree::deps![self])
             .default_handler(|_| async {})
             .error_handler(LoggingErrorHandler::with_custom_text(
@@ -294,5 +299,207 @@ impl BotService {
             .build()
             .dispatch()
             .await;
+    }
+}
+
+/// What a change of the bot's own membership means for the chat's webhook.
+#[derive(Debug, PartialEq, Eq)]
+enum MembershipAction {
+    /// The bot was added or re-added: register or reactivate the chat.
+    Register,
+    /// The bot left, was removed or was banned: deactivate the chat.
+    Deactivate,
+    /// The bot stayed in the chat (or out of it), e.g. it was promoted.
+    Ignore,
+}
+
+/// Compares whether the bot is in the chat before and after, not the literal
+/// statuses: it can be re-added as an administrator, come back after a ban, or
+/// be restricted while staying in the chat. Channels are ignored: they cannot
+/// run /start, so the bot never registers them, and adding it as a channel
+/// administrator must not post the setup message there.
+fn membership_action(
+    is_channel: bool,
+    old: &ChatMemberKind,
+    new: &ChatMemberKind,
+) -> MembershipAction {
+    if is_channel {
+        return MembershipAction::Ignore;
+    }
+    match (old.is_present(), new.is_present()) {
+        (false, true) => MembershipAction::Register,
+        (true, false) => MembershipAction::Deactivate,
+        _ => MembershipAction::Ignore,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::{r2d2::ConnectionManager, PgConnection};
+    use serde_json::json;
+    use std::ops::ControlFlow;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use teloxide::types::{Administrator, Banned, Restricted, UntilDate, UpdateKind};
+
+    fn administrator() -> ChatMemberKind {
+        ChatMemberKind::Administrator(Administrator {
+            custom_title: None,
+            is_anonymous: false,
+            can_be_edited: false,
+            can_manage_chat: true,
+            can_change_info: false,
+            can_post_messages: false,
+            can_edit_messages: false,
+            can_delete_messages: false,
+            can_manage_video_chats: false,
+            can_invite_users: false,
+            can_restrict_members: false,
+            can_pin_messages: false,
+            can_manage_topics: false,
+            can_promote_members: false,
+        })
+    }
+
+    fn banned() -> ChatMemberKind {
+        ChatMemberKind::Banned(Banned {
+            until_date: UntilDate::Forever,
+        })
+    }
+
+    fn restricted(is_member: bool) -> ChatMemberKind {
+        ChatMemberKind::Restricted(Restricted {
+            until_date: UntilDate::Forever,
+            is_member,
+            can_send_messages: true,
+            can_send_media_messages: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false,
+            can_change_info: false,
+            can_invite_users: false,
+            can_pin_messages: false,
+            can_manage_topics: false,
+            can_send_polls: false,
+        })
+    }
+
+    #[test]
+    fn readding_the_bot_registers_the_chat() {
+        // Whatever role the bot comes back with, as the 404 hint promises.
+        let joins = [
+            (ChatMemberKind::Left, ChatMemberKind::Member),
+            (ChatMemberKind::Left, administrator()),
+            (banned(), ChatMemberKind::Member),
+            (banned(), administrator()),
+            (restricted(false), ChatMemberKind::Member),
+        ];
+        for (old, new) in joins {
+            assert_eq!(
+                membership_action(false, &old, &new),
+                MembershipAction::Register,
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_the_bot_deactivates_the_chat() {
+        let removals = [
+            (ChatMemberKind::Member, ChatMemberKind::Left),
+            (ChatMemberKind::Member, banned()),
+            (administrator(), ChatMemberKind::Left),
+            (administrator(), banned()),
+            (administrator(), restricted(false)),
+        ];
+        for (old, new) in removals {
+            assert_eq!(
+                membership_action(false, &old, &new),
+                MembershipAction::Deactivate,
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn role_changes_inside_the_chat_change_nothing() {
+        let changes = [
+            (ChatMemberKind::Member, administrator()),
+            (administrator(), ChatMemberKind::Member),
+            (ChatMemberKind::Member, restricted(true)),
+            (restricted(true), ChatMemberKind::Member),
+        ];
+        for (old, new) in changes {
+            assert_eq!(
+                membership_action(false, &old, &new),
+                MembershipAction::Ignore,
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_membership_changes_are_ignored() {
+        // Channels cannot run /start, so the bot never registers them, and
+        // adding it as a channel administrator must not post the setup message.
+        assert_eq!(
+            membership_action(true, &ChatMemberKind::Left, &administrator()),
+            MembershipAction::Ignore
+        );
+        assert_eq!(
+            membership_action(true, &administrator(), &ChatMemberKind::Left),
+            MembershipAction::Ignore
+        );
+    }
+
+    #[tokio::test]
+    async fn bot_removal_reaches_my_chat_member_handler() {
+        // No database is reachable, so deactivation fails fast and only the
+        // routing and the removal branch are exercised.
+        let pool = diesel::r2d2::Pool::builder()
+            .min_idle(Some(0))
+            .connection_timeout(Duration::from_millis(100))
+            .build_unchecked(ConnectionManager::<PgConnection>::new(
+                "postgresql://localhost:1/unused",
+            ));
+        let service = BotService::new(
+            BotConfig {
+                bot_name: "Github".to_string(),
+                token: "0:test".to_string(),
+                webhook_base_url: String::new(),
+                admin_chat_id: None,
+            },
+            Arc::new(pool),
+        );
+        let bot_user =
+            json!({"id": 1, "is_bot": true, "first_name": "Alerts", "username": "alerts_bot"});
+        // teloxide parses update kinds from borrowed keys, so parse from a string.
+        let update: Update = serde_json::from_str(
+            &json!({
+                "update_id": 1,
+                "my_chat_member": {
+                    "chat": {"id": -1001234567890_i64, "type": "supergroup", "title": "Alerts"},
+                    "from": {"id": 2, "is_bot": false, "first_name": "Admin"},
+                    "date": 1700000000,
+                    "old_chat_member": {"user": bot_user, "status": "member"},
+                    "new_chat_member": {"user": bot_user, "status": "left"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(update.kind, UpdateKind::MyChatMember(_)));
+
+        let churn_before = METRICS.churned_chats.load(Ordering::Relaxed);
+        let result = BotService::update_handler()
+            .dispatch(dptree::deps![update, service])
+            .await;
+
+        assert!(
+            matches!(result, ControlFlow::Break(Ok(()))),
+            "my_chat_member update was not handled"
+        );
+        assert!(METRICS.churned_chats.load(Ordering::Relaxed) > churn_before);
     }
 }
