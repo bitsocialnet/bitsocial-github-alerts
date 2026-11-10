@@ -41,15 +41,24 @@ pub fn is_dependabot_event(body: &[u8]) -> bool {
             .any(is_dependabot_branch)
 }
 
-/// Returns true when a push contains the explicit opt-out marker in any commit
-/// message. This supports quiet, maintainer-authored dependency sweeps directly
-/// on the default branch without guessing from filenames or package metadata.
+const THREAD_BODY_PATHS: &[&[&str]] = &[&["issue", "body"], &["pull_request", "body"]];
+
+/// Returns true when the delivery carries the explicit opt-out marker: in any
+/// pushed commit message, or in the body of the issue or pull request the event
+/// is about. This supports quiet, maintainer-authored sweeps (dependency fixes
+/// on the default branch, bulk-filed issues) without guessing from filenames or
+/// package metadata. A body marker also covers that thread's later events, such
+/// as an issue closed by a merged pull request.
 pub fn has_skip_notification_marker(body: &[u8]) -> bool {
     let Some(payload) = parse_payload(body) else {
         return false;
     };
 
-    string_at_path(&payload, &["head_commit", "message"]).is_some_and(contains_skip_marker)
+    THREAD_BODY_PATHS
+        .iter()
+        .filter_map(|path| string_at_path(&payload, path))
+        .any(contains_skip_marker)
+        || string_at_path(&payload, &["head_commit", "message"]).is_some_and(contains_skip_marker)
         || payload
             .get("commits")
             .and_then(Value::as_array)
@@ -184,6 +193,38 @@ mod tests {
         .to_string();
         let body = serde_urlencoded::to_string([("payload", json)]).unwrap();
         assert!(has_skip_notification_marker(body.as_bytes()));
+    }
+
+    #[test]
+    fn suppresses_issue_event_with_marker_in_issue_body() {
+        let body = payload(json!({
+            "action": "opened",
+            "issue": {
+                "title": "Pending comment overwritten",
+                "body": "Details.\n\n<!-- [skip github-alerts] -->"
+            }
+        }));
+        assert!(has_skip_notification_marker(&body));
+    }
+
+    #[test]
+    fn suppresses_form_encoded_pull_request_event_with_marker_in_body() {
+        let json = json!({
+            "action": "closed",
+            "pull_request": {"title": "fix: guard reload", "body": "Closes #1 [Skip GitHub-Alerts]"}
+        })
+        .to_string();
+        let body = serde_urlencoded::to_string([("payload", json)]).unwrap();
+        assert!(has_skip_notification_marker(body.as_bytes()));
+    }
+
+    #[test]
+    fn does_not_suppress_issue_without_marker_in_body() {
+        let body = payload(json!({
+            "action": "opened",
+            "issue": {"title": "[skip github-alerts] in title only", "body": null}
+        }));
+        assert!(!has_skip_notification_marker(&body));
     }
 
     #[test]
