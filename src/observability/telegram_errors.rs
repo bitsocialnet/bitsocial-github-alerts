@@ -7,11 +7,31 @@ use teloxide::RequestError;
 pub enum TelegramErrorKind {
     RateLimited,
     BotBlocked,
+    BotRemoved,
     ChatNotFound,
     GroupMigrated { new_chat_id: i64 },
     NotEnoughRights,
     NetworkError,
     Other,
+}
+
+impl TelegramErrorKind {
+    /// Whether the chat can no longer receive messages, so its webhook should be
+    /// deactivated until someone sends /start again. `Other` covers Telegram
+    /// server errors, unparseable responses and problems with a single message
+    /// or topic, which say nothing about the chat, so it never deactivates.
+    pub fn deactivates_chat(&self) -> bool {
+        match self {
+            TelegramErrorKind::BotBlocked
+            | TelegramErrorKind::BotRemoved
+            | TelegramErrorKind::ChatNotFound
+            | TelegramErrorKind::NotEnoughRights => true,
+            TelegramErrorKind::RateLimited
+            | TelegramErrorKind::GroupMigrated { .. }
+            | TelegramErrorKind::NetworkError
+            | TelegramErrorKind::Other => false,
+        }
+    }
 }
 
 pub fn classify_telegram_error(error: &RequestError) -> TelegramErrorKind {
@@ -26,9 +46,13 @@ pub fn classify_telegram_error(error: &RequestError) -> TelegramErrorKind {
 
             if error_lower.contains("blocked") || error_lower.contains("bot was blocked") {
                 TelegramErrorKind::BotBlocked
+            } else if error_lower.contains("kicked") || error_lower.contains("not a member") {
+                TelegramErrorKind::BotRemoved
             } else if error_lower.contains("chat not found")
                 || error_lower.contains("chat_not_found")
                 || error_lower.contains("user not found")
+                || error_lower.contains("deactivated")
+                || error_lower.contains("chat was deleted")
             {
                 TelegramErrorKind::ChatNotFound
             } else if error_lower.contains("migrated") || error_lower.contains("migrate_to_chat_id")
@@ -105,6 +129,18 @@ pub async fn handle_telegram_error(bot: &Bot, error: &RequestError, chat_id: i64
                     Severity::Info,
                     "Telegram-Blocked",
                     &format!("Bot blocked by user in chat {} while {}", chat_id, context),
+                )
+                .await;
+        }
+        TelegramErrorKind::BotRemoved => {
+            tracing::info!("Bot removed from chat {}", chat_id);
+            METRICS.increment_errors();
+            ALERTS
+                .send_alert(
+                    bot,
+                    Severity::Info,
+                    "Telegram-Removed",
+                    &format!("Bot removed from chat {} while {}", chat_id, context),
                 )
                 .await;
         }
@@ -186,6 +222,7 @@ pub async fn handle_telegram_error(bot: &Bot, error: &RequestError, chat_id: i64
 mod tests {
     use super::*;
     use std::time::Duration;
+    use teloxide::ApiError;
 
     #[test]
     fn test_classify_rate_limited() {
@@ -231,5 +268,60 @@ mod tests {
             raw: "test".into(),
         };
         assert_eq!(get_retry_after_seconds(&other_error), None);
+    }
+
+    fn api_error(description: &str) -> RequestError {
+        RequestError::Api(ApiError::Unknown(description.to_string()))
+    }
+
+    #[test]
+    fn test_transient_or_message_errors_keep_chat_active() {
+        let errors = [
+            // Telegram 5xx with an HTML body (not JSON)
+            RequestError::InvalidJson {
+                source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
+                raw: "<html><body>502 Bad Gateway</body></html>".into(),
+            },
+            api_error("Internal Server Error"),
+            api_error("Bad Gateway"),
+            // Problems with one message or one topic, not with the chat
+            RequestError::Api(ApiError::CantParseEntities),
+            RequestError::Api(ApiError::MessageIsTooLong),
+            api_error("Bad Request: message thread not found"),
+            api_error("Bad Request: TOPIC_CLOSED"),
+        ];
+
+        for error in errors {
+            let kind = classify_telegram_error(&error);
+            assert!(
+                !kind.deactivates_chat(),
+                "{error} classified as {kind:?} must not deactivate the chat"
+            );
+        }
+    }
+
+    #[test]
+    fn test_removed_or_unreachable_chats_are_deactivated() {
+        let errors = [
+            RequestError::Api(ApiError::BotBlocked),
+            RequestError::Api(ApiError::BotKicked),
+            RequestError::Api(ApiError::BotKickedFromSupergroup),
+            RequestError::Api(ApiError::ChatNotFound),
+            RequestError::Api(ApiError::UserDeactivated),
+            api_error("Forbidden: bot was kicked from the group chat"),
+            api_error("Forbidden: bot was kicked from the channel chat"),
+            api_error("Forbidden: bot is not a member of the supergroup chat"),
+            api_error("Forbidden: the group chat was deleted"),
+            api_error("Bad Request: group chat was deactivated"),
+            api_error("Bad Request: not enough rights to send text messages to the chat"),
+        ];
+
+        for error in errors {
+            let kind = classify_telegram_error(&error);
+            assert!(
+                kind.deactivates_chat(),
+                "{error} classified as {kind:?} must deactivate the chat"
+            );
+        }
     }
 }
