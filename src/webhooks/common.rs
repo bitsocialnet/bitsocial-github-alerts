@@ -232,10 +232,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                                 METRICS.increment_messages_sent_for_bot(ctx.source);
                                 recovery_succeeded = true;
                                 ALERTS
-                                    .send_alert(
+                                    .send_chat_alert(
                                         &bot.bot,
                                         Severity::Info,
                                         "Chat-Migrated",
+                                        telegram_chat_id,
                                         &format!(
                                             "Chat migrated from {} to {}",
                                             telegram_chat_id, new_chat_id
@@ -277,10 +278,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         }
                     }
                 }
-                TelegramErrorKind::ChatNotFound
-                | TelegramErrorKind::BotBlocked
-                | TelegramErrorKind::NotEnoughRights
-                | TelegramErrorKind::Other => {
+                _ if error_kind.deactivates_chat() => {
                     tracing::info!(
                         "Telegram error {:?} for chat {}, deactivating chat",
                         error_kind,
@@ -294,10 +292,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         );
                     } else {
                         ALERTS
-                            .send_alert(
+                            .send_chat_alert(
                                 &bot.bot,
                                 Severity::Warning,
                                 "Bot-Deactivated",
+                                telegram_chat_id,
                                 &format!(
                                     "Chat {} deactivated (error: {:?})",
                                     telegram_chat_id, error_kind
@@ -362,15 +361,12 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         );
                     }
                 }
+                // Other: a Telegram server error or a problem with this one
+                // message or topic. Keep the chat active; it is reported below.
+                _ => {}
             }
 
-            let needs_generic_alert = !recovery_succeeded
-                && matches!(
-                    error_kind,
-                    TelegramErrorKind::RateLimited
-                        | TelegramErrorKind::NetworkError
-                        | TelegramErrorKind::GroupMigrated { .. }
-                );
+            let needs_generic_alert = !recovery_succeeded && !error_kind.deactivates_chat();
 
             if needs_generic_alert {
                 handle_telegram_error(

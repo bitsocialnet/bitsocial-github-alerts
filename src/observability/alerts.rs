@@ -81,6 +81,9 @@ impl AlertManager {
         };
         let now = Instant::now();
 
+        // Drop expired keys so per-chat keys do not accumulate.
+        last_alerts.retain(|_, last_time| now.duration_since(*last_time) < self.rate_limit);
+
         if let Some(last_time) = last_alerts.get(&key) {
             if now.duration_since(*last_time) < self.rate_limit {
                 return false;
@@ -89,6 +92,10 @@ impl AlertManager {
 
         last_alerts.insert(key, now);
         true
+    }
+
+    fn chat_throttle_key(category: &str, chat_id: i64) -> String {
+        format!("{}:{}", category, chat_id)
     }
 
     pub fn format_alert(&self, severity: Severity, category: &str, message: &str) -> String {
@@ -115,11 +122,39 @@ impl AlertManager {
     }
 
     pub async fn send_alert(&self, bot: &Bot, severity: Severity, category: &str, message: &str) {
+        self.send_throttled(bot, severity, category, category, message)
+            .await;
+    }
+
+    /// Like `send_alert`, but throttled per chat. Use it for one-time changes
+    /// of a chat's state (deactivation, migration), where a notice about one
+    /// chat must not suppress the notice about another.
+    pub async fn send_chat_alert(
+        &self,
+        bot: &Bot,
+        severity: Severity,
+        category: &str,
+        chat_id: i64,
+        message: &str,
+    ) {
+        let throttle_key = Self::chat_throttle_key(category, chat_id);
+        self.send_throttled(bot, severity, &throttle_key, category, message)
+            .await;
+    }
+
+    async fn send_throttled(
+        &self,
+        bot: &Bot,
+        severity: Severity,
+        throttle_key: &str,
+        category: &str,
+        message: &str,
+    ) {
         if env::var("ADMIN_LOGS").unwrap_or_default() != "ACTIVE" {
             return;
         }
 
-        if !self.should_alert(severity, category) {
+        if !self.should_alert(severity, throttle_key) {
             tracing::debug!("Alert rate-limited: {} - {}", category, message);
             return;
         }
@@ -216,6 +251,31 @@ mod tests {
 
         assert!(manager.should_alert(Severity::Error, "test"));
         assert!(manager.should_alert(Severity::Warning, "test"));
+    }
+
+    #[test]
+    fn test_chat_alerts_are_throttled_per_chat() {
+        let manager = AlertManager::new();
+        let key = |chat_id| AlertManager::chat_throttle_key("Bot-Deactivated", chat_id);
+
+        // Two chats deactivated within the window: both notices must go out.
+        assert!(manager.should_alert(Severity::Warning, &key(-1001)));
+        assert!(manager.should_alert(Severity::Warning, &key(-1002)));
+        // A repeat for the same chat is still throttled.
+        assert!(!manager.should_alert(Severity::Warning, &key(-1001)));
+    }
+
+    #[test]
+    fn test_expired_keys_are_dropped() {
+        let manager = AlertManager::with_rate_limit(Duration::from_millis(50));
+        let key = |chat_id| AlertManager::chat_throttle_key("Bot-Deactivated", chat_id);
+
+        assert!(manager.should_alert(Severity::Warning, &key(-1001)));
+        sleep(Duration::from_millis(60));
+        assert!(manager.should_alert(Severity::Warning, &key(-1002)));
+
+        let last_alerts = manager.last_alerts.lock().unwrap();
+        assert_eq!(last_alerts.len(), 1);
     }
 
     #[test]
