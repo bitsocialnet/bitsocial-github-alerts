@@ -46,7 +46,9 @@ pub fn classify_telegram_error(error: &RequestError) -> TelegramErrorKind {
 
             if error_lower.contains("blocked") || error_lower.contains("bot was blocked") {
                 TelegramErrorKind::BotBlocked
-            } else if error_lower.contains("kicked") || error_lower.contains("not a member") {
+            } else if error_lower.contains("bot was kicked")
+                || error_lower.contains("bot is not a member")
+            {
                 TelegramErrorKind::BotRemoved
             } else if error_lower.contains("chat not found")
                 || error_lower.contains("chat_not_found")
@@ -293,6 +295,23 @@ mod tests {
 
         for error in errors {
             let kind = classify_telegram_error(&error);
+            assert!(
+                !kind.deactivates_chat(),
+                "{error} classified as {kind:?} must not deactivate the chat"
+            );
+        }
+    }
+
+    #[test]
+    fn test_membership_errors_about_other_users_keep_chat_active() {
+        let errors = [
+            api_error("Bad Request: user is not a member of the chat"),
+            api_error("Bad Request: user was kicked from the chat"),
+        ];
+
+        for error in errors {
+            let kind = classify_telegram_error(&error);
+            assert_ne!(kind, TelegramErrorKind::BotRemoved, "{error}");
             assert!(
                 !kind.deactivates_chat(),
                 "{error} classified as {kind:?} must not deactivate the chat"
