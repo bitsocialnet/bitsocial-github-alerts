@@ -17,6 +17,24 @@ diesel::table! {
         updated_at -> Timestamptz,
         is_active -> Bool,
         deactivated_at -> Nullable<Timestamptz>,
+        last_digest_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    digest_events (id) {
+        id -> Int8,
+        chat_id -> Int4,
+        #[max_length = 32]
+        kind -> Varchar,
+        #[max_length = 255]
+        repo -> Varchar,
+        #[max_length = 255]
+        item -> Varchar,
+        #[max_length = 255]
+        actor -> Nullable<Varchar>,
+        url -> Nullable<Text>,
+        created_at -> Timestamptz,
     }
 }
 
@@ -33,6 +51,7 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(digest_events -> chats (chat_id));
 diesel::joinable!(webhooks -> chats (chat_id));
 
-diesel::allow_tables_to_appear_in_same_query!(chats, webhooks,);
+diesel::allow_tables_to_appear_in_same_query!(chats, digest_events, webhooks,);

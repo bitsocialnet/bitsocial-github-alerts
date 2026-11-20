@@ -10,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub mod bots;
 pub mod config;
+pub mod digest;
 pub mod http_server;
 pub mod observability;
 pub mod utils;
@@ -85,9 +86,21 @@ async fn main() {
         tracing::info!("GitHub bot enabled");
     }
 
+    task::spawn(digest::run_digest_scheduler(
+        pool.clone(),
+        config.github_token.clone(),
+        config.digest_interval_hours,
+    ));
+
     alert_startup_success().await;
 
-    if let Err(e) = run_http_server(pool, config.github_webhook_security.clone()).await {
+    if let Err(e) = run_http_server(
+        pool,
+        config.github_webhook_security.clone(),
+        config.alert_policy.clone(),
+    )
+    .await
+    {
         let error_msg = format!("{}", e);
         alert_http_server_error(&error_msg).await;
         std::process::exit(1);

@@ -17,6 +17,7 @@ pub struct Chat {
     pub updated_at: DateTime<Utc>,
     pub is_active: bool,
     pub deactivated_at: Option<DateTime<Utc>>,
+    pub last_digest_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -50,4 +51,42 @@ pub struct NewWebhook<'a> {
     pub name: &'a str,
     pub webhook_url: &'a str,
     pub chat_id: Option<i32>,
+}
+
+/// Kinds of activity a digest counts. Stored as text in `digest_events.kind`.
+pub mod digest_kind {
+    pub const COMMIT: &str = "commit";
+    pub const RELEASE: &str = "release";
+    pub const ISSUE_OPENED: &str = "issue_opened";
+    pub const ISSUE_CLOSED: &str = "issue_closed";
+    pub const PR_MERGED: &str = "pr_merged";
+}
+
+#[derive(Queryable, Selectable, Debug, Clone, PartialEq)]
+#[diesel(table_name = crate::schema::digest_events)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct DigestEvent {
+    pub id: i64,
+    pub chat_id: i32,
+    pub kind: String,
+    /// Full repository name, e.g. `bitsocialnet/5chan`.
+    pub repo: String,
+    /// Commit SHA, release tag, or issue or pull request number.
+    pub item: String,
+    /// GitHub login credited for the activity, if it is a person.
+    pub actor: Option<String>,
+    pub url: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Insertable, Debug, Clone, PartialEq)]
+#[diesel(table_name = crate::schema::digest_events)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewDigestEvent {
+    pub chat_id: i32,
+    pub kind: String,
+    pub repo: String,
+    pub item: String,
+    pub actor: Option<String>,
+    pub url: Option<String>,
 }

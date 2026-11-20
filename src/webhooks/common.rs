@@ -7,6 +7,7 @@ use crate::observability::{ALERTS, METRICS};
 use crate::utils::telegram_admin::send_message_to_admin;
 use actix_web::HttpResponse;
 use bitsocial_github_alerts::db::DbPool;
+use bitsocial_github_alerts::models::Chat;
 use bitsocial_github_alerts::{
     deactivate_chat, find_chat_by_id, find_webhook_by_webhook_url, migrate_chat_telegram_id,
 };
@@ -163,19 +164,81 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
     tracing::info!("Sending message to chat_id: {}", chat_id);
     tracing::info!("Message: {}", ctx.message);
 
-    let thread_id = chat.thread_id.and_then(|tid| tid.parse::<i32>().ok());
+    if deliver_message(DeliveryContext {
+        pool: ctx.pool,
+        bot: &bot,
+        chat: &chat,
+        message: ctx.message,
+        link_preview: ctx.link_preview,
+        source: ctx.source,
+        description: ctx.webhook_url,
+    })
+    .await
+        == Delivery::InvalidChat
+    {
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    if let Err(e) = send_message_to_admin(
+        &bot.bot,
+        format!(
+            "Event: {}, Chat id: {}",
+            encode_text(&ctx.event_name),
+            chat_id
+        ),
+        50,
+    )
+    .await
+    {
+        tracing::warn!("Failed to send admin notification: {}", e);
+    }
+
+    HttpResponse::Ok().finish()
+}
+
+/// Outcome of sending one message to a chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    /// Telegram refused or the send failed after the retries below.
+    Failed,
+    /// The stored Telegram chat id is not a number.
+    InvalidChat,
+}
+
+pub struct DeliveryContext<'a> {
+    pub pool: &'a DbPool,
+    pub bot: &'a BotService,
+    pub chat: &'a Chat,
+    pub message: String,
+    pub link_preview: bool,
+    pub source: &'a str,
+    /// What is being delivered, for logs: a webhook URL or "digest".
+    pub description: &'a str,
+}
+
+/// Send a message to a chat, recovering from a group migration, a rate limit
+/// or a network error, and deactivating the chat when Telegram says the bot
+/// can no longer post there.
+pub async fn deliver_message(ctx: DeliveryContext<'_>) -> Delivery {
+    let chat = ctx.chat;
+    let thread_id = chat
+        .thread_id
+        .as_deref()
+        .and_then(|tid| tid.parse::<i32>().ok());
 
     let telegram_chat_id = match chat.telegram_id.parse::<i64>() {
         Ok(id) => id,
         Err(e) => {
             tracing::error!("Invalid telegram_id '{}': {}", chat.telegram_id, e);
-            return HttpResponse::InternalServerError().finish();
+            return Delivery::InvalidChat;
         }
     };
 
     let message = truncate_message(ctx.message);
 
-    let result = bot
+    let result = ctx
+        .bot
         .send_telegram_message(TelegramMessage {
             chat_id: telegram_chat_id,
             thread_id,
@@ -187,16 +250,20 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
     match &result {
         Ok(_) => {
             METRICS.increment_messages_sent_for_bot(ctx.source);
+            Delivery::Sent
         }
         Err(e) => {
             tracing::error!(
-                "Failed to send Telegram message: {} for webhook_url: {}",
+                "Failed to send Telegram message: {} ({})",
                 e,
-                ctx.webhook_url
+                ctx.description
             );
 
             let error_kind = classify_telegram_error(e);
+            // recovery_succeeded: the error is dealt with (no generic alert needed);
+            // delivered: a retry actually reached the chat.
             let mut recovery_succeeded = false;
+            let mut delivered = false;
 
             match &error_kind {
                 TelegramErrorKind::GroupMigrated { new_chat_id } => {
@@ -219,7 +286,8 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                                     telegram_chat_id
                                 );
                             }
-                            let retry_result = bot
+                            let retry_result = ctx
+                                .bot
                                 .send_telegram_message(TelegramMessage {
                                     chat_id: *new_chat_id,
                                     thread_id,
@@ -231,11 +299,13 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                             if retry_result.is_ok() {
                                 METRICS.increment_messages_sent_for_bot(ctx.source);
                                 recovery_succeeded = true;
+                                delivered = true;
                                 ALERTS
-                                    .send_alert(
-                                        &bot.bot,
+                                    .send_chat_alert(
+                                        &ctx.bot.bot,
                                         Severity::Info,
                                         "Chat-Migrated",
+                                        telegram_chat_id,
                                         &format!(
                                             "Chat migrated from {} to {}",
                                             telegram_chat_id, new_chat_id
@@ -247,11 +317,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                                     "Retry to new chat ID {} failed after migration from {} (webhook: {}): {:?}",
                                     new_chat_id,
                                     telegram_chat_id,
-                                    ctx.webhook_url,
+                                    ctx.description,
                                     retry_err
                                 );
                                 handle_telegram_error(
-                                    &bot.bot,
+                                    &ctx.bot.bot,
                                     retry_err,
                                     *new_chat_id,
                                     "retrying after migration",
@@ -265,7 +335,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                             METRICS.increment_errors();
                             ALERTS
                                 .send_alert(
-                                    &bot.bot,
+                                    &ctx.bot.bot,
                                     Severity::Error,
                                     "Database-Migration",
                                     &format!(
@@ -277,10 +347,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         }
                     }
                 }
-                TelegramErrorKind::ChatNotFound
-                | TelegramErrorKind::BotBlocked
-                | TelegramErrorKind::NotEnoughRights
-                | TelegramErrorKind::Other => {
+                _ if error_kind.deactivates_chat() => {
                     tracing::info!(
                         "Telegram error {:?} for chat {}, deactivating chat",
                         error_kind,
@@ -294,10 +361,11 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         );
                     } else {
                         ALERTS
-                            .send_alert(
-                                &bot.bot,
+                            .send_chat_alert(
+                                &ctx.bot.bot,
                                 Severity::Warning,
                                 "Bot-Deactivated",
+                                telegram_chat_id,
                                 &format!(
                                     "Chat {} deactivated (error: {:?})",
                                     telegram_chat_id, error_kind
@@ -315,7 +383,8 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
 
-                    let retry_result = bot
+                    let retry_result = ctx
+                        .bot
                         .send_telegram_message(TelegramMessage {
                             chat_id: telegram_chat_id,
                             thread_id,
@@ -327,6 +396,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                     if retry_result.is_ok() {
                         METRICS.increment_messages_sent_for_bot(ctx.source);
                         recovery_succeeded = true;
+                        delivered = true;
                     } else {
                         tracing::error!(
                             "Retry after rate limit failed for chat {}: {:?}",
@@ -342,7 +412,8 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-                    let retry_result = bot
+                    let retry_result = ctx
+                        .bot
                         .send_telegram_message(TelegramMessage {
                             chat_id: telegram_chat_id,
                             thread_id,
@@ -354,6 +425,7 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                     if retry_result.is_ok() {
                         METRICS.increment_messages_sent_for_bot(ctx.source);
                         recovery_succeeded = true;
+                        delivered = true;
                     } else {
                         tracing::error!(
                             "Retry after network error failed for chat {}: {:?}",
@@ -362,41 +434,28 @@ pub async fn process_webhook(ctx: WebhookContext<'_>) -> HttpResponse {
                         );
                     }
                 }
+                // Other: a Telegram server error or a problem with this one
+                // message or topic. Keep the chat active; it is reported below.
+                _ => {}
             }
 
-            let needs_generic_alert = !recovery_succeeded
-                && matches!(
-                    error_kind,
-                    TelegramErrorKind::RateLimited
-                        | TelegramErrorKind::NetworkError
-                        | TelegramErrorKind::GroupMigrated { .. }
-                );
+            let needs_generic_alert = !recovery_succeeded && !error_kind.deactivates_chat();
 
             if needs_generic_alert {
                 handle_telegram_error(
-                    &bot.bot,
+                    &ctx.bot.bot,
                     e,
                     telegram_chat_id,
                     "sending webhook notification",
                 )
                 .await;
             }
+
+            if delivered {
+                Delivery::Sent
+            } else {
+                Delivery::Failed
+            }
         }
     }
-
-    if let Err(e) = send_message_to_admin(
-        &bot.bot,
-        format!(
-            "Event: {}, Chat id: {}",
-            encode_text(&ctx.event_name),
-            chat_id
-        ),
-        50,
-    )
-    .await
-    {
-        tracing::warn!("Failed to send admin notification: {}", e);
-    }
-
-    HttpResponse::Ok().finish()
 }

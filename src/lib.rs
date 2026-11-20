@@ -39,7 +39,31 @@ pub fn create_webhook(
 
 pub struct WebhookGetOrCreateInput<'a> {
     pub telegram_chat_id: &'a str,
-    pub telegram_thread_id: Option<&'a str>,
+    pub topic: TopicChange,
+}
+
+/// What a /start or the bot being added says about the forum topic a chat's
+/// alerts go to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopicChange {
+    /// Leave the stored topic as it is: the bot was added to the chat, or
+    /// /start was sent in a forum's General topic.
+    Keep,
+    /// /start was sent in this forum topic: alerts go there.
+    Set(i32),
+    /// /start was sent in a chat without topics: alerts go to the chat itself.
+    Clear,
+}
+
+impl TopicChange {
+    /// The `thread_id` to store for the chat, or `None` to keep the stored one.
+    fn thread_id_update(self) -> Option<Option<String>> {
+        match self {
+            TopicChange::Keep => None,
+            TopicChange::Set(thread_id) => Some(Some(thread_id.to_string())),
+            TopicChange::Clear => Some(None),
+        }
+    }
 }
 
 pub fn get_webhook_url_or_create(
@@ -48,8 +72,9 @@ pub fn get_webhook_url_or_create(
 ) -> Result<WebhookInfo, DbError> {
     let WebhookGetOrCreateInput {
         telegram_chat_id,
-        telegram_thread_id,
+        topic,
     } = input;
+    let thread_id_update = topic.thread_id_update();
 
     use self::schema::chats;
 
@@ -65,12 +90,8 @@ pub fn get_webhook_url_or_create(
             reactivate_chat(pool, telegram_chat_id)?;
         }
 
-        if let Some(thread_id) = telegram_thread_id {
-            if let Some(ref c) = find_chat_by_id(pool, chat.id)? {
-                if c.thread_id.is_none() {
-                    update_chat_thread_id(pool, c, thread_id)?;
-                }
-            }
+        if let Some(thread_id) = thread_id_update {
+            update_chat_thread_id(pool, telegram_chat_id, thread_id.as_deref())?;
         }
 
         match find_webhook_by_chat_id(pool, chat.id)? {
@@ -90,13 +111,14 @@ pub fn get_webhook_url_or_create(
     } else {
         let random_string = create_random_string();
         let name = "new_chat";
+        let thread_id = thread_id_update.flatten();
         let new_chat = create_chat(
             pool,
             CreateChatInput {
                 telegram_chat_id,
                 name,
                 webhook_url: Some(&random_string),
-                telegram_thread_id,
+                telegram_thread_id: thread_id.as_deref(),
                 language: "en",
             },
         )?;
@@ -143,18 +165,24 @@ pub fn create_chat(pool: &PgPool, create_chat_input: CreateChatInput) -> Result<
         .get_result(conn)?)
 }
 
+/// Set the topic on every row of a Telegram chat, like `deactivate_chat` and
+/// `reactivate_chat`. A chat can have more than one row (a group upgraded to a
+/// supergroup gets a second one), and each row's webhook URL must deliver to
+/// the topic the last /start chose.
 pub fn update_chat_thread_id(
     pool: &PgPool,
-    chat: &Chat,
-    telegram_thread_id: &str,
-) -> Result<Chat, DbError> {
+    telegram_chat_id: &str,
+    telegram_thread_id: Option<&str>,
+) -> Result<usize, DbError> {
     use self::schema::chats::dsl::*;
 
     let conn = &mut pool.get()?;
 
-    Ok(diesel::update(chat)
+    let updated = diesel::update(chats.filter(telegram_id.eq(telegram_chat_id)))
         .set(thread_id.eq(telegram_thread_id))
-        .get_result::<Chat>(conn)?)
+        .execute(conn)?;
+
+    Ok(updated)
 }
 
 pub fn find_webhook_by_webhook_url(pool: &PgPool, url: &str) -> Result<Option<Webhook>, DbError> {
@@ -254,4 +282,105 @@ pub fn migrate_chat_telegram_id(
         .execute(conn)?;
 
     Ok(updated > 0)
+}
+
+/// The chat a webhook URL delivers to, if the webhook exists and has one.
+pub fn find_chat_id_by_webhook_url(pool: &PgPool, url: &str) -> Result<Option<i32>, DbError> {
+    Ok(find_webhook_by_webhook_url(pool, url)?.and_then(|webhook| webhook.chat_id))
+}
+
+/// Record digest activity. Items already recorded for the same chat, kind and
+/// repository are skipped, so redeliveries and re-pushed commits count once.
+pub fn insert_digest_events(pool: &PgPool, events: &[NewDigestEvent]) -> Result<usize, DbError> {
+    use self::schema::digest_events;
+
+    if events.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::insert_into(digest_events::table)
+        .values(events)
+        .on_conflict_do_nothing()
+        .execute(conn)?)
+}
+
+/// A chat's digest activity recorded after `start` and up to `end`, oldest first.
+pub fn find_digest_events(
+    pool: &PgPool,
+    for_chat_id: i32,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<DigestEvent>, DbError> {
+    use self::schema::digest_events::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(digest_events
+        .filter(chat_id.eq(for_chat_id))
+        .filter(created_at.gt(start))
+        .filter(created_at.le(end))
+        .order((created_at.asc(), id.asc()))
+        .load::<DigestEvent>(conn)?)
+}
+
+pub fn find_active_chats(pool: &PgPool) -> Result<Vec<Chat>, DbError> {
+    use self::schema::chats::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(chats
+        .filter(is_active.eq(true))
+        .order(id.asc())
+        .load::<Chat>(conn)?)
+}
+
+/// Record that a chat's digest covers activity up to `at`.
+pub fn set_chat_last_digest_at(
+    pool: &PgPool,
+    for_chat_id: i32,
+    at: DateTime<Utc>,
+) -> Result<usize, DbError> {
+    use self::schema::chats::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::update(chats.filter(id.eq(for_chat_id)))
+        .set(last_digest_at.eq(at))
+        .execute(conn)?)
+}
+
+/// Delete digest activity recorded before `before`.
+pub fn delete_digest_events_before(pool: &PgPool, before: DateTime<Utc>) -> Result<usize, DbError> {
+    use self::schema::digest_events::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::delete(digest_events.filter(created_at.lt(before))).execute(conn)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_in_another_topic_moves_alerts_there() {
+        // The stored topic may have been deleted: /start in a new topic must
+        // replace it, or deliveries keep failing against the old one.
+        assert_eq!(
+            TopicChange::Set(34).thread_id_update(),
+            Some(Some("34".to_string()))
+        );
+    }
+
+    #[test]
+    fn start_in_a_chat_without_topics_clears_the_stored_topic() {
+        assert_eq!(TopicChange::Clear.thread_id_update(), Some(None));
+    }
+
+    #[test]
+    fn bot_join_and_general_topic_keep_the_stored_topic() {
+        assert_eq!(TopicChange::Keep.thread_id_update(), None);
+    }
 }

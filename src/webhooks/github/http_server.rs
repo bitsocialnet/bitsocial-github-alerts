@@ -1,16 +1,18 @@
 use crate::utils::branch_filter::BranchFilter;
 use crate::webhooks::common::{process_webhook, WebhookContext};
+use crate::webhooks::github::activity::digest_activity;
 use crate::webhooks::github::dependabot_filter::{
     has_skip_notification_marker, is_dependabot_event,
 };
+use crate::webhooks::github::policy::AlertPolicy;
 use crate::webhooks::github::security::{WebhookRejection, WebhookSecurity};
 use crate::webhooks::github::webhook_handlers::{
-    handle_check_run_event, handle_comment_event, handle_create_event, handle_delete_event,
-    handle_issue_event, handle_ping_event, handle_pull_request_event, handle_push_event,
-    handle_release_event, handle_wiki_event, handle_workflow_run_event,
+    handle_check_run_event, handle_comment_event, handle_issue_event, handle_ping_event,
+    handle_pull_request_event, handle_release_event, handle_wiki_event, handle_workflow_run_event,
 };
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
 use bitsocial_github_alerts::db::DbPool;
+use bitsocial_github_alerts::{find_chat_id_by_webhook_url, insert_digest_events};
 use serde::Deserialize;
 use std::env;
 
@@ -24,6 +26,7 @@ pub struct QueryParams {
 pub async fn handle_github_webhook(
     pool: web::Data<DbPool>,
     security: web::Data<WebhookSecurity>,
+    policy: web::Data<AlertPolicy>,
     webhook_url: web::Path<String>,
     query: web::Query<QueryParams>,
     req: HttpRequest,
@@ -75,23 +78,32 @@ pub async fn handle_github_webhook(
             return HttpResponse::Ok().finish();
         }
 
+        // Suppressed events never reach this point, so they stay out of the digest too.
+        let recorded = record_digest_activity(pool.get_ref(), &webhook_url, event_str, &body);
+
+        // Pushes (commits, branches, tags) and create/delete events are only
+        // counted in the digest; they are never posted on their own.
         let message = match event_str {
             "ping" => handle_ping_event(&body),
-            "push" => handle_push_event(&body, branch_filter.as_ref()),
-            "issues" => handle_issue_event(&body),
-            "pull_request" => handle_pull_request_event(&body, branch_filter.as_ref()),
+            "issues" => handle_issue_event(&body, &policy),
+            "pull_request" => handle_pull_request_event(&body, branch_filter.as_ref(), &policy),
             "issue_comment" | "pull_request_review_comment" | "commit_comment" => {
                 handle_comment_event(&body, false)
             }
             "check_run" => handle_check_run_event(&body),
-            "create" => handle_create_event(&body, branch_filter.as_ref()),
-            "delete" => handle_delete_event(&body, branch_filter.as_ref()),
             "gollum" => handle_wiki_event(&body),
             "release" => handle_release_event(&body),
             "workflow_run" => handle_workflow_run_event(&body, branch_filter.as_ref()),
             _ => String::new(),
         };
         tracing::info!("Message: {}", message);
+
+        // With nothing to post, the digest was the delivery's only use: report
+        // a failure so GitHub shows it and it can be redelivered. With a
+        // message, it is still sent (a redelivery would post it twice).
+        if !recorded && message.is_empty() {
+            return HttpResponse::InternalServerError().finish();
+        }
 
         let github_token = match env::var("GITHUB_TELOXIDE_TOKEN") {
             Ok(token) => token,
@@ -114,6 +126,39 @@ pub async fn handle_github_webhook(
         .await
     } else {
         HttpResponse::BadRequest().finish()
+    }
+}
+
+/// Store the delivery's digest activity for the chat its webhook URL delivers
+/// to. Returns false when it could not be stored because of a database error.
+fn record_digest_activity(pool: &DbPool, webhook_url: &str, event: &str, body: &[u8]) -> bool {
+    if !matches!(event, "push" | "issues" | "pull_request" | "release") {
+        return true;
+    }
+    let chat_id = match find_chat_id_by_webhook_url(pool, webhook_url) {
+        Ok(Some(chat_id)) => chat_id,
+        Ok(None) => return true,
+        Err(e) => {
+            tracing::error!("Failed to look up chat for digest activity: {}", e);
+            return false;
+        }
+    };
+    let events = digest_activity(event, body, chat_id);
+    match insert_digest_events(pool, &events) {
+        Ok(0) => true,
+        Ok(recorded) => {
+            tracing::info!(
+                "Recorded {} digest item(s) from {} event for chat {}",
+                recorded,
+                event,
+                chat_id
+            );
+            true
+        }
+        Err(e) => {
+            tracing::error!("Failed to record digest activity: {}", e);
+            false
+        }
     }
 }
 
@@ -142,6 +187,7 @@ mod security_tests {
             App::new()
                 .app_data(web::Data::new(Arc::new(pool)))
                 .app_data(web::Data::new(WebhookSecurity::new(SECRET).unwrap()))
+                .app_data(web::Data::new(AlertPolicy::default()))
                 .service(handle_github_webhook),
         )
         .await;
