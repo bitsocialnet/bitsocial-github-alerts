@@ -1,3 +1,4 @@
+use crate::webhooks::github::policy::AlertPolicy;
 use crate::webhooks::github::security::WebhookSecurity;
 use std::env;
 
@@ -13,6 +14,10 @@ pub struct AppConfig {
 
     pub github_token: String,
     pub github_webhook_security: WebhookSecurity,
+
+    /// Built from `CORE_GITHUB_LOGINS`: whose issues and pull requests are
+    /// only counted in the digest instead of posted as they happen.
+    pub alert_policy: AlertPolicy,
 }
 
 #[derive(Debug)]
@@ -97,6 +102,9 @@ impl AppConfig {
             })
             .unwrap_or(8080);
 
+        let alert_policy =
+            AlertPolicy::from_core_logins(&get_optional("CORE_GITHUB_LOGINS").unwrap_or_default());
+
         if !missing.is_empty() || !invalid.is_empty() {
             return Err(ConfigError {
                 missing_vars: missing,
@@ -113,6 +121,7 @@ impl AppConfig {
             admin_log_level,
             github_token: github_token.unwrap(),
             github_webhook_security: github_webhook_security.unwrap(),
+            alert_policy,
         })
     }
 
