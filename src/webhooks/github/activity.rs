@@ -39,9 +39,26 @@ struct PushCommit {
 #[derive(Debug, Deserialize)]
 struct CommitAuthor {
     /// GitHub login of the commit author; absent when the author's email is
-    /// not linked to a GitHub account (agents, bots without an account).
+    /// not linked to a GitHub account (agents, some GitHub App bots).
     #[serde(default)]
     username: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+impl CommitAuthor {
+    /// GitHub App bots commit as `name[bot]` with a
+    /// `id+name[bot]@users.noreply.github.com` email, often with no linked login.
+    fn is_bot(&self) -> bool {
+        self.username.as_deref().is_some_and(is_bot_login)
+            || self.name.as_deref().is_some_and(is_bot_login)
+            || self
+                .email
+                .as_deref()
+                .is_some_and(|email| email.to_ascii_lowercase().contains("[bot]@"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,20 +136,22 @@ pub fn digest_activity(event: &str, body: &[u8], chat_id: i32) -> Vec<NewDigestE
             push.commits
                 .iter()
                 .filter_map(|commit| {
-                    // Credit the commit's author, or whoever pushed it when the
-                    // author has no linked account. Bot commits are skipped,
-                    // but a bot pushing people's commits (a merge queue) is not.
+                    // Bot commits are skipped. Others are credited to their
+                    // author's login, or, without one, to the person who
+                    // pushed them; a bot pushing them gets no credit.
+                    if commit.author.as_ref().is_some_and(CommitAuthor::is_bot) {
+                        return None;
+                    }
                     let actor = match commit.author.as_ref().and_then(|a| a.username.as_deref()) {
-                        Some(author) if is_bot_login(author) => return None,
-                        Some(author) => author,
-                        None if push.sender.is_bot() => return None,
-                        None => push.sender.login.as_str(),
+                        Some(author) => Some(author),
+                        None if push.sender.is_bot() => None,
+                        None => Some(push.sender.login.as_str()),
                     };
                     Some(new_event(
                         digest_kind::COMMIT,
                         &push.repository.full_name,
                         commit.id.clone(),
-                        Some(actor.to_string()),
+                        actor.map(str::to_string),
                         commit.url.clone(),
                     ))
                 })
@@ -283,22 +302,34 @@ mod tests {
             push("refs/tags/v1.0.0", "tomcasaburi", commits.clone())
         )
         .is_empty());
-        // A bot's own commits are skipped, but people's commits it pushes count.
+        // A bot's own commits are skipped, linked or not; people's commits it
+        // pushes count, credited to their login if they have one.
+        let release_bot_commit = json!({
+            "id": "ddd",
+            "distinct": true,
+            "author": {
+                "name": "pkc-js-release-bot[bot]",
+                "email": "3394437+pkc-js-release-bot[bot]@users.noreply.github.com",
+            },
+        });
         let pushed_by_bot = activity(
             "push",
             push(
                 "refs/heads/master",
-                "github-actions[bot]",
+                "pkc-js-release-bot[bot]",
                 json!([
                     commit("aaa", None, true),
                     commit("bbb", Some("github-actions[bot]"), true),
-                    commit("ccc", Some("trackoor"), true)
+                    commit("ccc", Some("trackoor"), true),
+                    release_bot_commit
                 ]),
             ),
         );
-        assert_eq!(pushed_by_bot.len(), 1);
-        assert_eq!(pushed_by_bot[0].item, "ccc");
-        assert_eq!(pushed_by_bot[0].actor.as_deref(), Some("trackoor"));
+        let items: Vec<(&str, Option<&str>)> = pushed_by_bot
+            .iter()
+            .map(|e| (e.item.as_str(), e.actor.as_deref()))
+            .collect();
+        assert_eq!(items, vec![("aaa", None), ("ccc", Some("trackoor"))]);
 
         let mut deleted = push("refs/heads/master", "tomcasaburi", commits);
         deleted["deleted"] = json!(true);
