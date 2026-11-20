@@ -9,7 +9,7 @@ This is a fork of [mhkafadar/notifine](https://github.com/mhkafadar/notifine), s
 - **Compact messages** — pushes show at most 5 commits (first line of each commit message, truncated to 72 chars) plus an "… and N more" line
 - **Release notifications** — one-liner when a release is published, with tag link, release name, pre-release marker, and the first line of the release notes
 - **Dependabot suppression** — events from Dependabot and activity on `dependabot/*` branches are acknowledged without posting to Telegram
-- **Explicit push suppression** — include `[skip github-alerts]` in a commit message to acknowledge that push without posting to Telegram
+- **Explicit suppression** — include `[skip github-alerts]` in a commit message to acknowledge that push, or in an issue or pull request body (an HTML comment works) to acknowledge every event about that issue or pull request, without posting to Telegram
 - **Supported events**: push (incl. branch create/delete and force-push), release, issues (incl. transfers), pull requests, comments (issue/PR review/commit), check runs, workflow runs, wiki edits, ping
 - **Issue transfers** — reported once, from the source repository, naming who moved the issue and where it landed; the destination repository's `opened` event is dropped because GitHub sends it with the original author as sender
 - **Branch filtering** — `?branch=` / `?exclude_branch=` glob patterns on the webhook URL

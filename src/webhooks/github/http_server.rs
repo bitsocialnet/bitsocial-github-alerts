@@ -67,8 +67,11 @@ pub async fn handle_github_webhook(
             return HttpResponse::Ok().finish();
         }
 
-        if event_str == "push" && has_skip_notification_marker(&body) {
-            tracing::info!("Suppressing GitHub push event with notification skip marker");
+        if has_skip_notification_marker(&body) {
+            tracing::info!(
+                "Suppressing GitHub {} event with notification skip marker",
+                event_str
+            );
             return HttpResponse::Ok().finish();
         }
 
@@ -182,6 +185,29 @@ mod security_tests {
                 );
             }
         }
+
+        // A marked issue body must stop at suppression too: without the marker
+        // this delivery would reach the missing Telegram token and fail with 500.
+        let json = json!({
+            "repository": {"private": false, "owner": {"id": 243813100_u64, "type": "Organization"}},
+            "action": "opened",
+            "issue": {"title": "bulk-filed issue", "body": "text\n<!-- [skip github-alerts] -->"}
+        })
+        .to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(json.as_bytes());
+        let request = test::TestRequest::post()
+            .uri("/github/test-destination")
+            .insert_header(("content-type", "application/json"))
+            .insert_header(("x-github-event", "issues"))
+            .insert_header((
+                "x-hub-signature-256",
+                format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+            ))
+            .set_payload(json)
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
 
         for event in ["ping", "issues", "unknown"] {
             let request = test::TestRequest::post()
