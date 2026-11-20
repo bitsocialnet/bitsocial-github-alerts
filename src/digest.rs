@@ -18,9 +18,9 @@ use std::collections::HashMap;
 const DIGEST_ANCHOR_HOUR_UTC: u32 = 18;
 const RETENTION_DAYS: i64 = 30;
 const RETRY_AFTER_FAILURE: Duration = Duration::minutes(10);
-/// Attempts per digest time before a failing chat's digest is dropped, so a
+/// Failed sends of the same digest to a chat before it is dropped, so a
 /// permanent Telegram error (a deleted topic) does not retry forever.
-const MAX_ATTEMPTS: u32 = 3;
+const MAX_FAILED_SENDS: u32 = 3;
 /// Read a window this long after it closes, so rows stamped just before the
 /// digest time have committed.
 const READ_DELAY: Duration = Duration::seconds(30);
@@ -54,16 +54,10 @@ pub async fn run_digest_scheduler(pool: DbPool, token: String, interval_hours: u
         DIGEST_ANCHOR_HOUR_UTC
     );
 
-    let mut attempts: (DateTime<Utc>, u32) = (DateTime::<Utc>::MIN_UTC, 0);
+    let mut failed_sends = FailedSends::default();
     loop {
         let due = latest_digest_time(Utc::now() - READ_DELAY, interval);
-        attempts = if attempts.0 == due {
-            (due, attempts.1 + 1)
-        } else {
-            (due, 1)
-        };
-        let give_up = attempts.1 >= MAX_ATTEMPTS;
-        let all_sent = send_due_digests(&pool, &bot, due, interval, give_up).await;
+        let all_sent = send_due_digests(&pool, &bot, due, interval, &mut failed_sends).await;
         delete_expired_activity(&pool);
 
         let next_due = due + interval;
@@ -106,15 +100,35 @@ pub fn latest_digest_time(now: DateTime<Utc>, interval: Duration) -> DateTime<Ut
     anchor + Duration::seconds(interval.num_seconds() * intervals)
 }
 
+/// Failed sends per chat, for the digest time they were for.
+#[derive(Debug, Default)]
+struct FailedSends(HashMap<i32, (DateTime<Utc>, u32)>);
+
+impl FailedSends {
+    /// Count a failed send of a chat's digest up to `due`. Returns true when
+    /// that digest has now failed MAX_FAILED_SENDS times and should be dropped.
+    fn record(&mut self, chat_id: i32, due: DateTime<Utc>) -> bool {
+        let entry = self.0.entry(chat_id).or_insert((due, 0));
+        if entry.0 != due {
+            *entry = (due, 0);
+        }
+        entry.1 += 1;
+        entry.1 >= MAX_FAILED_SENDS
+    }
+
+    fn clear(&mut self, chat_id: i32) {
+        self.0.remove(&chat_id);
+    }
+}
+
 /// Send each active chat its digest for the activity up to `due`, unless it
-/// already got it. Returns false when a send failed and should be retried.
-/// With `give_up`, a failed digest is dropped instead.
+/// already got it. Returns false when something failed and should be retried.
 async fn send_due_digests(
     pool: &DbPool,
     bot: &BotService,
     due: DateTime<Utc>,
     interval: Duration,
-    give_up: bool,
+    failed_sends: &mut FailedSends,
 ) -> bool {
     let chats = match find_active_chats(pool) {
         Ok(chats) => chats,
@@ -152,20 +166,21 @@ async fn send_due_digests(
                 description: "digest",
             })
             .await;
-            if delivery == Delivery::Failed && !give_up {
-                // Keep last_digest_at so the retry covers this activity too.
-                all_sent = false;
-                continue;
-            }
             if delivery == Delivery::Failed {
+                if !failed_sends.record(chat.id, due) {
+                    // Keep last_digest_at so the retry covers this activity too.
+                    all_sent = false;
+                    continue;
+                }
                 tracing::error!(
-                    "Dropping the digest up to {} for chat {} after {} failed attempts",
+                    "Dropping the digest up to {} for chat {} after {} failed sends",
                     due,
                     chat.id,
-                    MAX_ATTEMPTS
+                    MAX_FAILED_SENDS
                 );
             }
         }
+        failed_sends.clear(chat.id);
 
         if let Err(e) = set_chat_last_digest_at(pool, chat.id, due) {
             tracing::error!("Failed to store digest time for chat {}: {}", chat.id, e);
@@ -413,6 +428,23 @@ mod tests {
         chat.last_digest_at = at(20, 18, 5);
         assert!(!is_due(&chat, at(20, 18, 0)));
         assert!(is_due(&chat, at(21, 18, 0)));
+    }
+
+    #[test]
+    fn a_digest_is_dropped_after_three_failed_sends_to_the_same_chat() {
+        let mut failed = FailedSends::default();
+        let due = at(20, 18, 0);
+        assert!(!failed.record(1, due));
+        assert!(!failed.record(1, due));
+        // Another chat's failures do not count towards chat 1.
+        assert!(!failed.record(2, due));
+        assert!(failed.record(1, due));
+
+        // A new digest time starts a new count, and so does a successful send.
+        assert!(!failed.record(2, at(21, 18, 0)));
+        assert!(!failed.record(2, at(21, 18, 0)));
+        failed.clear(2);
+        assert!(!failed.record(2, at(21, 18, 0)));
     }
 
     #[test]
