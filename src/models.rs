@@ -17,7 +17,7 @@ pub struct Chat {
     pub updated_at: DateTime<Utc>,
     pub is_active: bool,
     pub deactivated_at: Option<DateTime<Utc>>,
-    pub last_digest_at: Option<DateTime<Utc>>,
+    pub last_digest_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]

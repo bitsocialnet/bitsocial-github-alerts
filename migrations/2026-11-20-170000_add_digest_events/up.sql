@@ -14,4 +14,7 @@ CREATE TABLE digest_events (
 
 CREATE INDEX digest_events_chat_id_created_at_idx ON digest_events (chat_id, created_at);
 
-ALTER TABLE chats ADD COLUMN last_digest_at TIMESTAMPTZ;
+-- End of the activity the chat's last digest covered. Existing chats start
+-- now and new chats when they register, so a first digest covers only time
+-- the bot was recording.
+ALTER TABLE chats ADD COLUMN last_digest_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

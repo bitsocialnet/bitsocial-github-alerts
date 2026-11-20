@@ -126,21 +126,7 @@ async fn send_due_digests(
 
     let mut all_sent = true;
     for chat in chats.iter().filter(|chat| is_due(chat, due)) {
-        let start = match chat.last_digest_at {
-            Some(last) => last,
-            None => {
-                // Store the first window's start, so failed sends that run past
-                // the next digest time still cover it.
-                // Without it, skip the chat and retry rather than send.
-                let start = due - interval;
-                if let Err(e) = set_chat_last_digest_at(pool, chat.id, start) {
-                    tracing::error!("Failed to store digest time for chat {}: {}", chat.id, e);
-                    all_sent = false;
-                    continue;
-                }
-                start
-            }
-        };
+        let start = chat.last_digest_at;
         let events = match find_digest_events(pool, chat.id, start, due) {
             Ok(events) => events,
             Err(e) => {
@@ -190,7 +176,7 @@ async fn send_due_digests(
 }
 
 fn is_due(chat: &Chat, due: DateTime<Utc>) -> bool {
-    chat.last_digest_at.is_none_or(|last| last < due)
+    chat.last_digest_at < due
 }
 
 /// The digest message for activity recorded after `start` and up to `end`,
@@ -418,13 +404,15 @@ mod tests {
             updated_at: at(1, 0, 0),
             is_active: true,
             deactivated_at: None,
-            last_digest_at: None,
+            last_digest_at: at(19, 18, 0),
         };
         assert!(is_due(&chat, at(20, 18, 0)));
-        chat.last_digest_at = Some(at(19, 18, 0));
-        assert!(is_due(&chat, at(20, 18, 0)));
-        chat.last_digest_at = Some(at(20, 18, 0));
+        chat.last_digest_at = at(20, 18, 0);
         assert!(!is_due(&chat, at(20, 18, 0)));
+        // A chat registered after a digest time waits for the next one.
+        chat.last_digest_at = at(20, 18, 5);
+        assert!(!is_due(&chat, at(20, 18, 0)));
+        assert!(is_due(&chat, at(21, 18, 0)));
     }
 
     #[test]

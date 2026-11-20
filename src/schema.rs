@@ -17,7 +17,7 @@ diesel::table! {
         updated_at -> Timestamptz,
         is_active -> Bool,
         deactivated_at -> Nullable<Timestamptz>,
-        last_digest_at -> Nullable<Timestamptz>,
+        last_digest_at -> Timestamptz,
     }
 }
 

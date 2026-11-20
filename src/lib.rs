@@ -347,7 +347,7 @@ pub fn set_chat_last_digest_at(
     let conn = &mut pool.get()?;
 
     Ok(diesel::update(chats.filter(id.eq(for_chat_id)))
-        .set(last_digest_at.eq(Some(at)))
+        .set(last_digest_at.eq(at))
         .execute(conn)?)
 }
 
