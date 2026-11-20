@@ -284,6 +284,82 @@ pub fn migrate_chat_telegram_id(
     Ok(updated > 0)
 }
 
+/// The chat a webhook URL delivers to, if the webhook exists and has one.
+pub fn find_chat_id_by_webhook_url(pool: &PgPool, url: &str) -> Result<Option<i32>, DbError> {
+    Ok(find_webhook_by_webhook_url(pool, url)?.and_then(|webhook| webhook.chat_id))
+}
+
+/// Record digest activity. Items already recorded for the same chat, kind and
+/// repository are skipped, so redeliveries and re-pushed commits count once.
+pub fn insert_digest_events(pool: &PgPool, events: &[NewDigestEvent]) -> Result<usize, DbError> {
+    use self::schema::digest_events;
+
+    if events.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::insert_into(digest_events::table)
+        .values(events)
+        .on_conflict_do_nothing()
+        .execute(conn)?)
+}
+
+/// A chat's digest activity recorded after `start` and up to `end`, oldest first.
+pub fn find_digest_events(
+    pool: &PgPool,
+    for_chat_id: i32,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<DigestEvent>, DbError> {
+    use self::schema::digest_events::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(digest_events
+        .filter(chat_id.eq(for_chat_id))
+        .filter(created_at.gt(start))
+        .filter(created_at.le(end))
+        .order((created_at.asc(), id.asc()))
+        .load::<DigestEvent>(conn)?)
+}
+
+pub fn find_active_chats(pool: &PgPool) -> Result<Vec<Chat>, DbError> {
+    use self::schema::chats::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(chats
+        .filter(is_active.eq(true))
+        .order(id.asc())
+        .load::<Chat>(conn)?)
+}
+
+/// Record that a chat's digest covers activity up to `at`.
+pub fn set_chat_last_digest_at(
+    pool: &PgPool,
+    for_chat_id: i32,
+    at: DateTime<Utc>,
+) -> Result<usize, DbError> {
+    use self::schema::chats::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::update(chats.filter(id.eq(for_chat_id)))
+        .set(last_digest_at.eq(Some(at)))
+        .execute(conn)?)
+}
+
+/// Delete digest activity recorded before `before`.
+pub fn delete_digest_events_before(pool: &PgPool, before: DateTime<Utc>) -> Result<usize, DbError> {
+    use self::schema::digest_events::dsl::*;
+
+    let conn = &mut pool.get()?;
+
+    Ok(diesel::delete(digest_events.filter(created_at.lt(before))).execute(conn)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

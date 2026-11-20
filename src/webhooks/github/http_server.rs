@@ -1,5 +1,6 @@
 use crate::utils::branch_filter::BranchFilter;
 use crate::webhooks::common::{process_webhook, WebhookContext};
+use crate::webhooks::github::activity::digest_activity;
 use crate::webhooks::github::dependabot_filter::{
     has_skip_notification_marker, is_dependabot_event,
 };
@@ -11,6 +12,7 @@ use crate::webhooks::github::webhook_handlers::{
 };
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
 use bitsocial_github_alerts::db::DbPool;
+use bitsocial_github_alerts::{find_chat_id_by_webhook_url, insert_digest_events};
 use serde::Deserialize;
 use std::env;
 
@@ -76,6 +78,9 @@ pub async fn handle_github_webhook(
             return HttpResponse::Ok().finish();
         }
 
+        // Suppressed events never reach this point, so they stay out of the digest too.
+        record_digest_activity(pool.get_ref(), &webhook_url, event_str, &body);
+
         // Pushes (commits, branches, tags) and create/delete events are only
         // counted in the digest; they are never posted on their own.
         let message = match event_str {
@@ -114,6 +119,33 @@ pub async fn handle_github_webhook(
         .await
     } else {
         HttpResponse::BadRequest().finish()
+    }
+}
+
+/// Store the delivery's digest activity for the chat its webhook URL delivers
+/// to. Failures are logged and never fail the delivery.
+fn record_digest_activity(pool: &DbPool, webhook_url: &str, event: &str, body: &[u8]) {
+    if !matches!(event, "push" | "issues" | "pull_request" | "release") {
+        return;
+    }
+    let chat_id = match find_chat_id_by_webhook_url(pool, webhook_url) {
+        Ok(Some(chat_id)) => chat_id,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!("Failed to look up chat for digest activity: {}", e);
+            return;
+        }
+    };
+    let events = digest_activity(event, body, chat_id);
+    match insert_digest_events(pool, &events) {
+        Ok(0) => {}
+        Ok(recorded) => tracing::info!(
+            "Recorded {} digest item(s) from {} event for chat {}",
+            recorded,
+            event,
+            chat_id
+        ),
+        Err(e) => tracing::error!("Failed to record digest activity: {}", e),
     }
 }
 

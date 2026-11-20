@@ -10,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub mod bots;
 pub mod config;
+pub mod digest;
 pub mod http_server;
 pub mod observability;
 pub mod utils;
@@ -84,6 +85,12 @@ async fn main() {
         );
         tracing::info!("GitHub bot enabled");
     }
+
+    task::spawn(digest::run_digest_scheduler(
+        pool.clone(),
+        config.github_token.clone(),
+        config.digest_interval_hours,
+    ));
 
     alert_startup_success().await;
 

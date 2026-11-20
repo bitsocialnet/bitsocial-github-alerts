@@ -2,6 +2,9 @@ use crate::webhooks::github::policy::AlertPolicy;
 use crate::webhooks::github::security::WebhookSecurity;
 use std::env;
 
+/// Default hours between digests: one a day.
+const DEFAULT_DIGEST_INTERVAL_HOURS: u32 = 24;
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
@@ -18,6 +21,8 @@ pub struct AppConfig {
     /// Built from `CORE_GITHUB_LOGINS`: whose issues and pull requests are
     /// only counted in the digest instead of posted as they happen.
     pub alert_policy: AlertPolicy,
+    /// `DIGEST_INTERVAL_HOURS`: 0 turns the digest off; otherwise a divisor of 24.
+    pub digest_interval_hours: u32,
 }
 
 #[derive(Debug)]
@@ -105,6 +110,15 @@ impl AppConfig {
         let alert_policy =
             AlertPolicy::from_core_logins(&get_optional("CORE_GITHUB_LOGINS").unwrap_or_default());
 
+        let digest_interval_hours = get_optional("DIGEST_INTERVAL_HOURS")
+            .map(|value| {
+                parse_digest_interval_hours(&value).unwrap_or_else(|error| {
+                    invalid.push(("DIGEST_INTERVAL_HOURS".into(), error));
+                    DEFAULT_DIGEST_INTERVAL_HOURS
+                })
+            })
+            .unwrap_or(DEFAULT_DIGEST_INTERVAL_HOURS);
+
         if !missing.is_empty() || !invalid.is_empty() {
             return Err(ConfigError {
                 missing_vars: missing,
@@ -122,10 +136,41 @@ impl AppConfig {
             github_token: github_token.unwrap(),
             github_webhook_security: github_webhook_security.unwrap(),
             alert_policy,
+            digest_interval_hours,
         })
     }
 
     pub fn is_admin_logs_active(&self) -> bool {
         self.admin_logs == "ACTIVE"
+    }
+}
+
+/// Digests run at fixed UTC times every day, so the interval must divide 24.
+fn parse_digest_interval_hours(value: &str) -> Result<u32, String> {
+    let hours: u32 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{value}' is not a whole number of hours"))?;
+    if hours == 0 || 24 % hours == 0 {
+        Ok(hours)
+    } else {
+        Err(format!(
+            "{hours} does not divide 24; use 0 (off), 1, 2, 3, 4, 6, 8, 12 or 24"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_interval_must_divide_a_day() {
+        assert_eq!(parse_digest_interval_hours("24"), Ok(24));
+        assert_eq!(parse_digest_interval_hours(" 6 "), Ok(6));
+        assert_eq!(parse_digest_interval_hours("0"), Ok(0));
+        assert!(parse_digest_interval_hours("5").is_err());
+        assert!(parse_digest_interval_hours("48").is_err());
+        assert!(parse_digest_interval_hours("daily").is_err());
     }
 }

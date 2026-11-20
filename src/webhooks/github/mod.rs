@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod dependabot_filter;
 pub mod http_server;
 pub mod policy;
