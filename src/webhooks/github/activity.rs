@@ -109,7 +109,7 @@ pub fn digest_activity(event: &str, body: &[u8], chat_id: i32) -> Vec<NewDigestE
             let Ok(push) = parse_webhook_payload::<PushPayload>(body) else {
                 return Vec::new();
             };
-            if push.deleted || push.sender.is_bot() || !pushes_to_default_branch(&push) {
+            if push.deleted || !pushes_to_default_branch(&push) {
                 return Vec::new();
             }
             // Every commit the push brings onto the default branch counts,
@@ -119,16 +119,20 @@ pub fn digest_activity(event: &str, body: &[u8], chat_id: i32) -> Vec<NewDigestE
             push.commits
                 .iter()
                 .filter_map(|commit| {
-                    let author = commit.author.as_ref().and_then(|a| a.username.as_deref());
-                    if author.is_some_and(is_bot_login) {
-                        return None;
-                    }
-                    let actor = author.unwrap_or(&push.sender.login).to_string();
+                    // Credit the commit's author, or whoever pushed it when the
+                    // author has no linked account. Bot commits are skipped,
+                    // but a bot pushing people's commits (a merge queue) is not.
+                    let actor = match commit.author.as_ref().and_then(|a| a.username.as_deref()) {
+                        Some(author) if is_bot_login(author) => return None,
+                        Some(author) => author,
+                        None if push.sender.is_bot() => return None,
+                        None => push.sender.login.as_str(),
+                    };
                     Some(new_event(
                         digest_kind::COMMIT,
                         &push.repository.full_name,
                         commit.id.clone(),
-                        Some(actor),
+                        Some(actor.to_string()),
                         commit.url.clone(),
                     ))
                 })
@@ -279,11 +283,22 @@ mod tests {
             push("refs/tags/v1.0.0", "tomcasaburi", commits.clone())
         )
         .is_empty());
-        assert!(activity(
+        // A bot's own commits are skipped, but people's commits it pushes count.
+        let pushed_by_bot = activity(
             "push",
-            push("refs/heads/master", "github-actions[bot]", commits.clone())
-        )
-        .is_empty());
+            push(
+                "refs/heads/master",
+                "github-actions[bot]",
+                json!([
+                    commit("aaa", None, true),
+                    commit("bbb", Some("github-actions[bot]"), true),
+                    commit("ccc", Some("trackoor"), true)
+                ]),
+            ),
+        );
+        assert_eq!(pushed_by_bot.len(), 1);
+        assert_eq!(pushed_by_bot[0].item, "ccc");
+        assert_eq!(pushed_by_bot[0].actor.as_deref(), Some("trackoor"));
 
         let mut deleted = push("refs/heads/master", "tomcasaburi", commits);
         deleted["deleted"] = json!(true);

@@ -79,7 +79,7 @@ pub async fn handle_github_webhook(
         }
 
         // Suppressed events never reach this point, so they stay out of the digest too.
-        record_digest_activity(pool.get_ref(), &webhook_url, event_str, &body);
+        let recorded = record_digest_activity(pool.get_ref(), &webhook_url, event_str, &body);
 
         // Pushes (commits, branches, tags) and create/delete events are only
         // counted in the digest; they are never posted on their own.
@@ -97,6 +97,13 @@ pub async fn handle_github_webhook(
             _ => String::new(),
         };
         tracing::info!("Message: {}", message);
+
+        // With nothing to post, the digest was the delivery's only use: report
+        // a failure so GitHub shows it and it can be redelivered. With a
+        // message, it is still sent (a redelivery would post it twice).
+        if !recorded && message.is_empty() {
+            return HttpResponse::InternalServerError().finish();
+        }
 
         let github_token = match env::var("GITHUB_TELOXIDE_TOKEN") {
             Ok(token) => token,
@@ -123,29 +130,35 @@ pub async fn handle_github_webhook(
 }
 
 /// Store the delivery's digest activity for the chat its webhook URL delivers
-/// to. Failures are logged and never fail the delivery.
-fn record_digest_activity(pool: &DbPool, webhook_url: &str, event: &str, body: &[u8]) {
+/// to. Returns false when it could not be stored because of a database error.
+fn record_digest_activity(pool: &DbPool, webhook_url: &str, event: &str, body: &[u8]) -> bool {
     if !matches!(event, "push" | "issues" | "pull_request" | "release") {
-        return;
+        return true;
     }
     let chat_id = match find_chat_id_by_webhook_url(pool, webhook_url) {
         Ok(Some(chat_id)) => chat_id,
-        Ok(None) => return,
+        Ok(None) => return true,
         Err(e) => {
             tracing::error!("Failed to look up chat for digest activity: {}", e);
-            return;
+            return false;
         }
     };
     let events = digest_activity(event, body, chat_id);
     match insert_digest_events(pool, &events) {
-        Ok(0) => {}
-        Ok(recorded) => tracing::info!(
-            "Recorded {} digest item(s) from {} event for chat {}",
-            recorded,
-            event,
-            chat_id
-        ),
-        Err(e) => tracing::error!("Failed to record digest activity: {}", e),
+        Ok(0) => true,
+        Ok(recorded) => {
+            tracing::info!(
+                "Recorded {} digest item(s) from {} event for chat {}",
+                recorded,
+                event,
+                chat_id
+            );
+            true
+        }
+        Err(e) => {
+            tracing::error!("Failed to record digest activity: {}", e);
+            false
+        }
     }
 }
 
