@@ -131,9 +131,12 @@ async fn send_due_digests(
             None => {
                 // Store the first window's start, so failed sends that run past
                 // the next digest time still cover it.
+                // Without it, skip the chat and retry rather than send.
                 let start = due - interval;
                 if let Err(e) = set_chat_last_digest_at(pool, chat.id, start) {
                     tracing::error!("Failed to store digest time for chat {}: {}", chat.id, e);
+                    all_sent = false;
+                    continue;
                 }
                 start
             }
